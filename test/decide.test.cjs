@@ -21,7 +21,7 @@ test('windowHeadroom formula', () => {
 test('windowHeadroom: past reset -> null, far reset (skew) -> elapsed 0', () => {
   assert.strictEqual(windowHeadroom(10, NOW - 1, 100, NOW), null);
   assert.strictEqual(windowHeadroom(10, NOW, 100, NOW), null);
-  approx(windowHeadroom(30, NOW + 500 * MIN, 100, NOW), 70);
+  approx(windowHeadroom(30, NOW + 500 * MIN, 100, NOW), 40); // (100-30) - max(0, 30-0)
 });
 
 const win = (name, used, minsToReset, lenMin) => ({ name, used, resetsAt: NOW + minsToReset * MIN, lenMin });
@@ -30,8 +30,9 @@ const prov = (...windows) => ({ known: true, windows });
 test('providerScore: min over windows', () => {
   const s = providerScore(prov(win('weekly', 20, 5040, 10080), win('monthly', 10, 43200, 43200)), cfg, NOW);
   assert.strictEqual(s.status, 'eligible');
-  approx(s.headroom, Math.min(hr(20, 50), 90));
-  assert.strictEqual(s.headroom, 70);
+  approx(s.headroom, 80); // weekly 80, monthly (100-10)-10 = 80
+  const t = providerScore(prov(win('weekly', 20, 5040, 10080), win('monthly', 5, 43200, 43200)), cfg, NOW);
+  assert.strictEqual(t.headroom, 80); // min(80, 90)
 });
 
 test('providerScore: fresh data without windows -> 100', () => {
@@ -96,7 +97,7 @@ test('decide: higher headroom wins, hysteresis keeps lastPick unless margin > 10
   assert.strictEqual(dec({ opencode: mk(20), claude: mk(10), lastPick: 'opencode' }).verdict, 'opencode'); // diff 10 exactly
   assert.strictEqual(dec({ opencode: mk(21), claude: mk(10), lastPick: 'opencode' }).verdict, 'claude'); // diff 11
   assert.strictEqual(dec({ opencode: mk(10), claude: mk(20), lastPick: 'claude' }).verdict, 'claude');
-  assert.strictEqual(dec({ opencode: mk(10), claude: mk(30), lastPick: 'opencode' }).verdict, 'claude');
+  assert.strictEqual(dec({ opencode: mk(30), claude: mk(10), lastPick: 'opencode' }).verdict, 'claude');
   assert.strictEqual(dec({ opencode: mk(10), claude: mk(10) }).verdict, 'opencode'); // tie
   assert.strictEqual(dec({ opencode: mk(10), claude: mk(10) }).balanced, true);
 });
