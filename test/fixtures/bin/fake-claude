@@ -1,0 +1,7 @@
+#!/usr/bin/env node
+'use strict';
+require('./fake-common.cjs')([
+  '{"type":"system","subtype":"init","session_id":"s1"}',
+  '{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"command":"node --test"}}]}}',
+  '{"type":"result","subtype":"success","is_error":false,"result":"FAKE CLAUDE REPORT: 12 tests passed"}',
+]);

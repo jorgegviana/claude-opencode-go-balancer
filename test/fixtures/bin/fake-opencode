@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+'use strict';
+require('./fake-common.cjs')([
+  '{"type":"text","part":{"type":"text","messageID":"m1","text":"FAKE OPENCODE REPORT: 12 tests passed"}}',
+  '{"type":"tool_use","part":{"state":{"input":{"command":"node --test"}}}}',
+]);

@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"s1"}
+{"type":"result","subtype":"success","is_error":true,"result":"5-hour limit reached, resets_at 2026-11-17T15:00:00Z"}

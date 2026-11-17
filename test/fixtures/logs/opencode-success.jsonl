@@ -1,0 +1,1 @@
+{"type":"text","part":{"type":"text","messageID":"m1","text":"Done. I added rate limit handling and a usage limit notice (HTTP 429 mapping)."}}

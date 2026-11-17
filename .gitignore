@@ -13,3 +13,4 @@ auth.json
 .opencode-relay/
 build/
 node_modules/
+!test/fixtures/**/*.jsonl
