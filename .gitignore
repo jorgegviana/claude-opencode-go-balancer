@@ -1,0 +1,15 @@
+*.jsonl
+*.pid
+*.err
+*.base
+*.provider
+*.agent
+*.tmp
+balancer-state.json
+usage-state.json
+.env
+.env.*
+auth.json
+.opencode-relay/
+build/
+node_modules/
