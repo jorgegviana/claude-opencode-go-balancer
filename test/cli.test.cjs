@@ -89,3 +89,37 @@ test('unknown command exits 2', () => {
   assert.strictEqual(run(['bogus']).status, 2);
   assert.strictEqual(run([]).status, 2);
 });
+
+// ---- free lane ----
+const FREE_M = 'opencode/glm-5.3-flash-free';
+function freeSetup({ enabled = true, agents = ['gsd-executor'], canary = true } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'free-'));
+  const cfg = path.join(dir, 'cfg.json');
+  fs.writeFileSync(cfg, JSON.stringify({ free_lane: { enabled, agents, models: [FREE_M] } }));
+  const state = path.join(dir, 'state.json');
+  if (canary) fs.writeFileSync(state, JSON.stringify({ canary: { [FREE_M]: { ok: true, ts: NOW - 3600e3, detail: '' } } }));
+  return { dir, cfg, state, env: { BALANCER_CONFIG: cfg, BALANCER_STATE: state } };
+}
+
+test('free: pick prints "free <model>" even with the usage file missing; lastPick untouched', () => {
+  const s = freeSetup();
+  const r = run(['pick', 'go-gsd-executor'], { env: { ...s.env, BALANCER_OPENCODE_USAGE_FILE: path.join(s.dir, 'missing.json') } });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(r.stdout.split('\n')[0], 'free ' + FREE_M);
+  assert.strictEqual(JSON.parse(fs.readFileSync(s.state, 'utf8')).lastPick, undefined);
+});
+
+test('free: disabled, unlisted agent or no canary -> existing verdicts', () => {
+  for (const [opts, agent] of [[{ enabled: false }, 'go-gsd-executor'], [{}, 'go-worker'], [{ canary: false }, 'go-gsd-executor']]) {
+    const s = freeSetup(opts);
+    const r = run(['pick', agent], { cl: 'claude-high.json', env: s.env });
+    assert.match(r.stdout.split('\n')[0], /^(opencode|claude)$/, JSON.stringify(opts));
+  }
+});
+
+test('free: pinned agent never goes free', () => {
+  const s = freeSetup();
+  fs.writeFileSync(s.cfg, JSON.stringify({ lanes: { pinned_to_claude: ['gsd-executor'] }, free_lane: { enabled: true, agents: ['gsd-executor'], models: [FREE_M] } }));
+  const r = run(['pick', 'go-gsd-executor'], { env: s.env });
+  assert.strictEqual(r.stdout.split('\n')[0], 'claude');
+});

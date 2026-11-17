@@ -33,7 +33,7 @@ async function cmdPick(ctx, agent) {
   if (!agent) { console.error('usage: balancer pick <agent>'); return 2; }
   const d = await engine.pick(ctx, agent);
   const until = d.until ? ' ' + iso(d.until) : '';
-  console.log(d.verdict === 'wait' ? `wait${until}` : d.verdict);
+  console.log(d.verdict === 'wait' ? `wait${until}` : d.verdict === 'free' ? `free ${d.model}` : d.verdict);
   console.error(`balancer: ${d.reason}`);
   return 0;
 }

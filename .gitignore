@@ -4,6 +4,8 @@
 *.base
 *.provider
 *.agent
+*.model
+*.escalated
 *.tmp
 balancer-state.json
 usage-state.json

@@ -50,7 +50,7 @@ function childEnv(cwd, provider) {
   for (const d of [env.TMPDIR, env.XDG_CACHE_HOME, env.UV_CACHE_DIR]) {
     try { fs.mkdirSync(d, { recursive: true }); } catch { /* best effort */ }
   }
-  if (provider === 'opencode') env.OPENCODE_ENABLE_EXA = '1';
+  if (provider === 'opencode' || provider === 'free') env.OPENCODE_ENABLE_EXA = '1';
   return env;
 }
 
@@ -65,7 +65,7 @@ function agentBody(cfg, agent) {
   }
 }
 
-function providerArgs(provider, { agent, cwd, prompt, cfg, paygo }) {
+function providerArgs(provider, { agent, cwd, prompt, cfg, paygo, model }) {
   if (provider === 'claude') {
     const c = cfg.claude;
     const abs = path.resolve(cwd, prompt);
@@ -81,7 +81,8 @@ function providerArgs(provider, { agent, cwd, prompt, cfg, paygo }) {
   }
   const msg = `Execute the task in the attached file exactly as written. It is your full spawn prompt from the orchestrator. Finish with the structured report it asks for. ${RULES}`;
   const args = ['run', msg, '--agent', agent, '--dir', cwd, '--format', 'json', '-f', prompt];
-  if (paygo && cfg.paygo.model) args.push('--model', cfg.paygo.model);
+  if (provider === 'free') args.push('--model', model);
+  else if (paygo && cfg.paygo.model) args.push('--model', cfg.paygo.model);
   return args;
 }
 
@@ -95,12 +96,22 @@ function spawnProvider(provider, opts) {
   fs.closeSync(out);
   fs.closeSync(err);
   fs.writeFileSync(prompt + '.provider', provider + '\n');
+  if (provider === 'free') fs.writeFileSync(prompt + '.model', opts.model + '\n');
+  else fs.rmSync(prompt + '.model', { force: true });
   return child;
 }
 
-async function safePick(ctx, agent) {
+// Map a pick verdict to the provider that actually runs ('free' | 'claude' | 'opencode').
+const providerOf = (verdict) => (verdict === 'free' ? 'free' : verdict === 'claude' ? 'claude' : 'opencode');
+
+// Spawn the chosen provider for a non-wait verdict; returns the child.
+function launch(d, { agent, cwd, prompt, cfg }) {
+  return spawnProvider(providerOf(d.verdict), { agent, cwd, prompt, cfg, paygo: d.verdict === 'paygo', model: d.model });
+}
+
+async function safePick(ctx, agent, opts) {
   try {
-    return await engine.pick(ctx, agent);
+    return await engine.pick(ctx, agent, opts);
   } catch (e) {
     process.stderr.write(`relay: balancer failed (${String(e && e.message).slice(0, 120)}); using opencode\n`);
     return { verdict: 'opencode', reason: 'balancer error fallback' };
@@ -115,9 +126,9 @@ async function start(agent, prompt) {
   const cwd = process.cwd();
   const ctx = engine.makeCtx();
   const d = await safePick(ctx, agent);
-  const verdict = d.verdict === 'wait' || d.verdict === 'paygo' ? d.verdict : d.verdict === 'claude' ? 'claude' : 'opencode';
+  const verdict = d.verdict === 'wait' || d.verdict === 'paygo' || d.verdict === 'free' ? d.verdict : d.verdict === 'claude' ? 'claude' : 'opencode';
   if (verdict !== 'wait') {
-    const bin = binFor(verdict === 'claude' ? 'claude' : 'opencode');
+    const bin = binFor(providerOf(verdict));
     if (!onPath(bin)) { console.log(`relay-failure: ${bin} not on PATH`); return 2; }
   }
   const gitDir = git(['rev-parse', '--git-common-dir'], cwd);
@@ -146,11 +157,11 @@ async function start(agent, prompt) {
     console.log(`relay: both subscriptions limited, deferred until ${d.until ? new Date(d.until).toISOString() : 'unknown'}`);
     return 0;
   }
-  const provider = verdict === 'claude' ? 'claude' : 'opencode';
-  const child = spawnProvider(provider, { agent, cwd, prompt, cfg: ctx.cfg, paygo: verdict === 'paygo' });
+  const provider = providerOf(verdict);
+  const child = launch({ verdict, model: d.model }, { agent, cwd, prompt, cfg: ctx.cfg });
   child.unref();
   fs.writeFileSync(prompt + '.pid', child.pid + '\n');
-  console.log(`started pid ${child.pid} agent=${agent} provider=${provider}${verdict === 'paygo' ? ' (paygo)' : ''}`);
+  console.log(`started pid ${child.pid} agent=${agent} provider=${provider}${provider === 'free' ? ` model=${d.model}` : ''}${verdict === 'paygo' ? ' (paygo)' : ''}`);
   return 0;
 }
 
@@ -164,8 +175,7 @@ async function deferred(agent, prompt) {
     d = await safePick(ctx, agent);
     if (d.verdict !== 'wait') break;
   }
-  const provider = d.verdict === 'claude' ? 'claude' : 'opencode';
-  const child = spawnProvider(provider, { agent, cwd, prompt, cfg: ctx.cfg, paygo: d.verdict === 'paygo' });
+  const child = launch(d, { agent, cwd, prompt, cfg: ctx.cfg });
   await new Promise((resolve) => { child.on('exit', resolve); child.on('error', resolve); });
   return 0;
 }
@@ -205,7 +215,8 @@ async function wait(prompt) {
   console.log('DONE');
   const cwd = process.cwd();
   let provider = readText(prompt + '.provider', 'opencode').trim();
-  if (provider !== 'claude') provider = 'opencode';
+  if (!['claude', 'free'].includes(provider)) provider = 'opencode';
+  const model = provider === 'free' ? readText(prompt + '.model').trim() : undefined;
   const agent = readText(prompt + '.agent').trim();
   const base = readText(prompt + '.base').trim();
   const { report, errors, commands } = extractReport(readText(prompt + '.jsonl').split('\n').filter(Boolean));
@@ -235,7 +246,7 @@ async function wait(prompt) {
   try {
     const ctx = engine.makeCtx();
     console.log(engine.recordRun(ctx, {
-      provider, agent: agent || 'unknown', logFile: prompt + '.jsonl', errFile: prompt + '.err', extraFailure: !report,
+      provider, model, agent: agent || 'unknown', logFile: prompt + '.jsonl', errFile: prompt + '.err', extraFailure: !report,
     }));
   } catch { /* reactive bookkeeping never fails the relay */ }
   console.log(`relay: ${provider} (log: ${prompt}.jsonl)`);

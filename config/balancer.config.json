@@ -33,6 +33,14 @@
       "usage limit",
       "rate[ _-]?limit",
       "limit reached"
+    ],
+    "model_gone_cooldown_seconds": 3600,
+    "model_gone_patterns": [
+      "model[ _-]?not[ _-]?found",
+      "model_not_found",
+      "\\b404\\b",
+      "model\\b[^\\n]{0,120}does not exist",
+      "retired"
     ]
   },
   "claude": {
@@ -62,5 +70,26 @@
   "paygo": {
     "enabled": false,
     "model": null
+  },
+  "free_lane": {
+    "enabled": false,
+    "models": [
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/glm-5.3-flash-free",
+      "opencode/mimo-v2.6-flash-free",
+      "opencode/minimax-m3.1-flash-free",
+      "opencode/longcat-2.5-free",
+      "opencode/hy4-flash-free",
+      "opencode/big-pickle"
+    ],
+    "agents": [],
+    "canary_ttl_days": 7,
+    "canary_timeout_seconds": 300,
+    "escalate_on_failure": true
+  },
+  "catalog": {
+    "ttl_seconds": 600,
+    "timeout_seconds": 20,
+    "check_agent_models": true
   }
 }

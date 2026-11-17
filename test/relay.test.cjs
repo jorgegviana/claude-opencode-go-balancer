@@ -242,3 +242,36 @@ test('wait records a limit error: opencode goes into cooldown', () => {
   assert.strictEqual(st.providers.opencode.cooldownUntil, NOW + 120 * 1000);
   assert.match(lastLine(w.stdout), /^relay: opencode/);
 });
+
+// ---- free lane ----
+const FREE_M = 'opencode/glm-5.3-flash-free';
+function freeEnv(dir, extra = {}, free = {}) {
+  const cfg = path.join(dir, 'free-cfg.json');
+  fs.writeFileSync(cfg, JSON.stringify({ free_lane: { enabled: true, agents: ['gsd-executor'], models: [FREE_M], ...free } }));
+  const st = path.join(dir, 'balancer-state.json');
+  if (!fs.existsSync(st)) {
+    fs.writeFileSync(st, JSON.stringify({ canary: { [FREE_M]: { ok: true, ts: NOW - 3600e3, detail: '' } } }));
+  }
+  return env(dir, { BALANCER_CONFIG: cfg, ...extra });
+}
+
+test('free: start/wait runs opencode with --model, records the model only', () => {
+  const { dir, prompt } = mkRepo();
+  const e = freeEnv(dir);
+  const s = relay(['start', AGENT, prompt], dir, e);
+  assert.strictEqual(s.status, 0, s.stdout + s.stderr);
+  assert.strictEqual(s.stdout.split('\n')[0], `started pid ${fs.readFileSync(prompt + '.pid', 'utf8').trim()} agent=${AGENT} provider=free model=${FREE_M}`);
+  assert.strictEqual(fs.readFileSync(prompt + '.provider', 'utf8').trim(), 'free');
+  assert.strictEqual(fs.readFileSync(prompt + '.model', 'utf8').trim(), FREE_M);
+  const w = relay(['wait', prompt], dir, e);
+  assert.match(w.stdout, /^DONE\n/);
+  assert.match(w.stdout, /----- FINAL REPORT -----\nFAKE OPENCODE REPORT/);
+  assert.strictEqual(lastLine(w.stdout), `relay: free (log: ${prompt}.jsonl)`);
+  const a = readJson(path.join(dir, 'argv.json'));
+  assert.strictEqual(a.argv[0], 'run');
+  assert.strictEqual(a.argv[a.argv.indexOf('--agent') + 1], AGENT);
+  assert.strictEqual(a.argv[a.argv.indexOf('--model') + 1], FREE_M);
+  assert.strictEqual(a.tmpdir, path.join(dir, 'build', 'tmp'));
+  const st = readJson(path.join(dir, 'balancer-state.json'));
+  assert.strictEqual(st.providers, undefined);
+});
