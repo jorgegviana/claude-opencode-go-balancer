@@ -44,6 +44,10 @@ function freeLines(ctx, state, now) {
     return e.ok ? `${p} ${age(now - e.ts)} old, ${Object.keys(e.models).length} models` : `${p} unavailable (${age(now - e.ts)} old)`;
   });
   lines.push(`catalog: ${cats.join('; ') || 'not loaded'}`);
+  for (const [prov, g] of Object.entries(f.spend_guard || {})) {
+    const e = state.spend && state.spend[prov];
+    lines.push(`spend guard ${prov}: floor $${g.min_balance_usd}, ` + (e ? (e.ok ? `balance $${e.balance.toFixed(2)} (${age(now - e.ts)} old)` : `unknown (${e.error})`) : 'not checked yet'));
+  }
   return lines;
 }
 

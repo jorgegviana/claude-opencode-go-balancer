@@ -31,7 +31,7 @@ test('config: free_lane defaults, consumer-shaped config stays disabled', () => 
 test('normalizeModel', () => {
   assert.strictEqual(F.normalizeModel('glm-5.3-flash-free'), 'opencode/glm-5.3-flash-free');
   assert.strictEqual(F.normalizeModel('opencode/x-free'), 'opencode/x-free');
-  for (const bad of ['-rf', '', 'a b', 'opencode/../x', 'opencode/-x', null, 'a/b/c']) {
+  for (const bad of ['-rf', '', 'a b', 'opencode/../x', 'opencode/-x', null, 'a/b/c/d/e', 'a/b/../c', 'openrouter/x/-y']) {
     assert.strictEqual(F.normalizeModel(bad), null, String(bad));
   }
 });

@@ -263,6 +263,24 @@ stripped, and passed with `--append-system-prompt`. To widen permissions, edit
   provider is `unknown`, never an error.
 - Claude window data is only as fresh as the statusline.
 
+## OpenRouter (prepaid credits) in the free lane
+
+Any `provider/model` opencode can run may go in `free_lane.models`, including OpenRouter ids with a nested path and
+`:free` suffix (`openrouter/google/gemma-4-31b-it:free`). Log in once with `opencode auth login` (the key stays in
+opencode's `auth.json`; the balancer reads it at runtime only).
+
+A model is *paid* unless the catalog says its cost is 0. Paid models are only picked when
+`free_lane.spend_guard.<provider>` exists and the live credit balance (`GET https://openrouter.ai/api/v1/credits`)
+is at least `min_balance_usd`:
+
+```json
+"spend_guard": { "openrouter": { "min_balance_usd": 5, "cache_seconds": 300 } }
+```
+
+Unknown balance, fetch failure, or no guard for the provider means paid models are skipped (fail closed); free models
+are unaffected. `balancer status` shows the balance and floor. Privacy: OpenRouter routes to third-party providers whose
+data policies differ; check each model before opting an agent in.
+
 ## Optional: RTK token savings
 
 If [rtk](https://github.com/rtk-ai/rtk) is on your PATH, `balancer status` appends one line with its
