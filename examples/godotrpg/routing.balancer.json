@@ -1,0 +1,52 @@
+{
+  "_comment": "Balancer config for the godotrpg GSD setup. Use with BALANCER_CONFIG=<this file>. GSD agent names live only in examples.",
+  "lanes": {
+    "opencode_agent_prefix": "go-",
+    "pinned_to_claude": [
+      "gsd-planner",
+      "gsd-debug-session-manager",
+      "gsd-eval-planner",
+      "gsd-framework-selector",
+      "gsd-dom-verifier"
+    ],
+    "balanced_agents": "*",
+    "default_lane": "opencode"
+  },
+  "claude": {
+    "agent_prompt_dir": "~/.claude/agents"
+  },
+  "opencode": {
+    "agent_models": {
+      "gsd-executor": "opencode-go/kimi-k2.7-code",
+      "gsd-code-fixer": "opencode-go/kimi-k2.7-code",
+      "gsd-debugger": "opencode-go/kimi-k3.1-pro",
+      "gsd-security-auditor": "opencode-go/kimi-k3.1-pro",
+      "gsd-roadmapper": "opencode-go/deepseek-v4-pro",
+      "gsd-assumptions-analyzer": "opencode-go/deepseek-v4-pro",
+      "gsd-user-profiler": "opencode-go/deepseek-v4-pro",
+      "gsd-phase-researcher": "opencode-go/deepseek-v4-pro",
+      "gsd-code-reviewer": "opencode-go/glm-5.3",
+      "gsd-verifier": "opencode-go/glm-5.3",
+      "gsd-eval-auditor": "opencode-go/glm-5.3",
+      "gsd-project-researcher": "opencode-go/minimax-m3",
+      "gsd-ai-researcher": "opencode-go/minimax-m3",
+      "gsd-domain-researcher": "opencode-go/minimax-m3",
+      "gsd-ui-researcher": "opencode-go/minimax-m3",
+      "gsd-advisor-researcher": "opencode-go/minimax-m3",
+      "gsd-doc-writer": "opencode-go/qwen3.7-plus",
+      "gsd-doc-synthesizer": "opencode-go/qwen3.7-plus",
+      "gsd-codebase-mapper": "opencode-go/deepseek-v4.1-flash",
+      "gsd-pattern-mapper": "opencode-go/deepseek-v4.1-flash",
+      "gsd-plan-checker": "opencode-go/deepseek-v4.1-flash",
+      "gsd-integration-checker": "opencode-go/deepseek-v4.1-flash",
+      "gsd-nyquist-auditor": "opencode-go/deepseek-v4.1-flash",
+      "gsd-research-synthesizer": "opencode-go/deepseek-v4.1-flash",
+      "gsd-doc-classifier": "opencode-go/deepseek-v4.1-flash",
+      "gsd-doc-verifier": "opencode-go/deepseek-v4.1-flash",
+      "gsd-ui-checker": "opencode-go/deepseek-v4.1-flash",
+      "gsd-ui-auditor": "opencode-go/deepseek-v4.1-flash",
+      "gsd-intel-updater": "opencode-go/deepseek-v4.1-flash",
+      "gsd-mempalace-curator": "opencode-go/deepseek-v4.1-flash"
+    }
+  }
+}
