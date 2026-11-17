@@ -52,6 +52,15 @@ async function main(argv, env = process.env) {
     case 'status': await cmdStatus(ctx); return 0;
     case 'pick': return cmdPick(ctx, rest[0]);
     case 'wait-reset': return cmdWaitReset(ctx, rest);
+    case 'record': {
+      const [provider, agent, logFile, errFile] = rest;
+      if (!['opencode', 'claude'].includes(provider) || !agent || !logFile) {
+        console.error('usage: balancer record <opencode|claude> <agent> <log-file> [<err-file>]');
+        return 2;
+      }
+      console.log(engine.recordRun(ctx, { provider, agent, logFile, errFile }));
+      return 0;
+    }
     default:
       console.error('usage: balancer status | pick <agent> | wait-reset [--max-seconds N] | record <provider> <agent> <log> [<err>]');
       return 2;
