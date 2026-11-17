@@ -58,3 +58,12 @@ test('runCanary: throwing exec fails and cleans up', () => {
   assert.strictEqual(r.ok, false);
   assert.ok(!fs.existsSync(cwd));
 });
+
+test('canary failure detail surfaces an upstream 429', () => {
+  const { runCanary } = require('../lib/canary.cjs');
+  const exec = () => ({ status: 1, stdout: '{"type":"error","error":{"data":{"message":"model is temporarily rate-limited upstream. see https://x.y/z","statusCode":429}}}', stderr: '' });
+  const r = runCanary({ model: 'a/b', exec, bin: 'x', timeoutSeconds: 5 });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.detail, /upstream HTTP 429 - model is temporarily rate-limited upstream/);
+  assert.ok(!/https?:/.test(r.detail));
+});
