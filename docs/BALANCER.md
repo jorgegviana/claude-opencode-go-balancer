@@ -184,3 +184,14 @@ stripped, and passed with `--append-system-prompt`. To widen permissions, edit
 - The OpenCode usage endpoint is not a documented public API and may change; on any failure the
   provider is `unknown`, never an error.
 - Claude window data is only as fresh as the statusline.
+
+## Optional: RTK token savings
+
+If [rtk](https://github.com/rtk-ai/rtk) is on your PATH, `balancer status` appends one line with its
+cumulative savings (`rtk gain -f json`). It is display-only and never affects routing. If `rtk` is
+missing or fails, the line is simply omitted.
+
+Safety notes when using RTK alongside this project:
+- Install the Apache-only `rtk-oss` edition from a checksum-verified release; keep telemetry off; do not enable pipelines or the proxy.
+- Commands that scan raw logs for errors (for example headless Godot output) must read the raw text:
+  use `rtk bypass <cmd>` or call the tool directly. The manual `rtk summary` and `rtk test` views can omit error lines.

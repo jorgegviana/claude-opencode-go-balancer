@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 const engine = require('../lib/engine.cjs');
+const { readRtkGain } = require('../lib/rtk.cjs');
 
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -22,6 +23,8 @@ async function cmdStatus(ctx) {
   const age = data.claudeTs ? ` (data age ${Math.round((now - data.claudeTs) / 60000)}m)` : ' (no statusline data yet)';
   lines.push(fmtProvider('claude', data.claude, scores.claude, age));
   lines.push(`last pick: ${state.lastPick || 'none'}`);
+  const gain = readRtkGain();
+  if (gain) lines.push(gain);
   try { engine.saveState(ctx, state); } catch { /* status is read-only in spirit */ }
   console.log(lines.join('\n'));
 }
