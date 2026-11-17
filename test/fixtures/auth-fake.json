@@ -1,0 +1,6 @@
+{
+  "opencode-go": {
+    "type": "api",
+    "key": "FAKE_KEY_FOR_TESTS"
+  }
+}
