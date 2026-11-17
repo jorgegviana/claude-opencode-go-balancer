@@ -1,0 +1,69 @@
+opencode-go/kimi-k2.7-code
+{
+  "id": "kimi-k2.7-code",
+  "providerID": "opencode-go",
+  "name": "kimi-k2.7-code",
+  "status": "active",
+  "cost": {
+    "input": 0.5,
+    "output": 2,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "toolcall": true
+  }
+}
+opencode-go/glm-5.3
+{
+  "id": "glm-5.3",
+  "providerID": "opencode-go",
+  "name": "glm-5.3",
+  "status": "active",
+  "cost": {
+    "input": 0.4,
+    "output": 1.6,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "toolcall": true
+  }
+}
+opencode-go/deepseek-v4-pro
+{
+  "id": "deepseek-v4-pro",
+  "providerID": "opencode-go",
+  "name": "deepseek-v4-pro",
+  "status": "deprecated",
+  "cost": {
+    "input": 0.3,
+    "output": 1.2,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "toolcall": true
+  }
+}

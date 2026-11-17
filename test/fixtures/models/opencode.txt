@@ -1,0 +1,138 @@
+opencode/beam-free
+{
+  "id": "beam-free",
+  "providerID": "opencode",
+  "name": "beam-free",
+  "status": "active",
+  "cost": {
+    "input": 0,
+    "output": 0,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "toolcall": true
+  }
+}
+opencode/deepseek-v4.1-flash-free
+{
+  "id": "deepseek-v4.1-flash-free",
+  "providerID": "opencode",
+  "name": "deepseek-v4.1-flash-free",
+  "status": "active",
+  "cost": {
+    "input": 0,
+    "output": 0,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "toolcall": true
+  }
+}
+opencode/glm-5.3-flash-free
+{
+  "id": "glm-5.3-flash-free",
+  "providerID": "opencode",
+  "name": "glm-5.3-flash-free",
+  "status": "active",
+  "cost": {
+    "input": 0,
+    "output": 0,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "toolcall": true
+  }
+}
+opencode/mimo-v2.6-flash-free
+{
+  "id": "mimo-v2.6-flash-free",
+  "providerID": "opencode",
+  "name": "mimo-v2.6-flash-free",
+  "status": "active",
+  "cost": {
+    "input": 0,
+    "output": 0,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "toolcall": true
+  }
+}
+opencode/big-pickle
+{
+  "id": "big-pickle",
+  "providerID": "opencode",
+  "name": "big-pickle",
+  "status": "active",
+  "cost": {
+    "input": 0,
+    "output": 0,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "toolcall": true
+  }
+}
+opencode/premium-pro
+{
+  "id": "premium-pro",
+  "providerID": "opencode",
+  "name": "premium-pro",
+  "status": "active",
+  "cost": {
+    "input": 3,
+    "output": 15,
+    "cache": {
+      "read": 0,
+      "write": 0
+    }
+  },
+  "limit": {
+    "context": 200000,
+    "output": 32000
+  },
+  "capabilities": {
+    "temperature": true,
+    "toolcall": true
+  }
+}
