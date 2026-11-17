@@ -275,3 +275,48 @@ test('free: start/wait runs opencode with --model, records the model only', () =
   const st = readJson(path.join(dir, 'balancer-state.json'));
   assert.strictEqual(st.providers, undefined);
 });
+
+test('free: failed free run escalates exactly once to the normal lanes', () => {
+  const { dir, prompt } = mkRepo();
+  const e = freeEnv(dir, { FAKE_FAIL_MODEL: FREE_M });
+  const s = relay(['start', AGENT, prompt], dir, e);
+  assert.match(s.stdout, /provider=free/);
+  const w = relay(['wait', prompt], dir, e);
+  assert.strictEqual(w.status, 0, w.stdout + w.stderr);
+  assert.match(w.stdout, /^DONE\n/);
+  assert.match(w.stdout, /FAKE OPENCODE REPORT/);
+  assert.match(w.stdout, new RegExp(`relay: escalated from free \\(${FREE_M}: failure\\) to opencode\n`));
+  assert.strictEqual(lastLine(w.stdout), `relay: opencode (log: ${prompt}.jsonl)`);
+  assert.ok(!readJson(path.join(dir, 'argv.json')).argv.includes('--model'));
+  assert.ok(fs.existsSync(prompt + '.free.jsonl') && fs.existsSync(prompt + '.free.err'));
+  assert.ok(fs.existsSync(prompt + '.escalated'));
+  const st = readJson(path.join(dir, 'balancer-state.json'));
+  assert.strictEqual(st.breakers[FREE_M].failures, 1);
+});
+
+test('free: no second escalation when .escalated exists or escalate_on_failure is false', () => {
+  for (const mode of ['sidecar', 'flag']) {
+    const { dir, prompt } = mkRepo();
+    const e = freeEnv(dir, { FAKE_FAIL_MODEL: FREE_M }, mode === 'flag' ? { escalate_on_failure: false } : {});
+    relay(['start', AGENT, prompt], dir, e);
+    if (mode === 'sidecar') fs.writeFileSync(prompt + '.escalated', 'x\n');
+    const w = relay(['wait', prompt], dir, e);
+    assert.match(w.stdout, /relay-failure: no-report/, mode);
+    assert.strictEqual(lastLine(w.stdout), `relay: free (log: ${prompt}.jsonl)`, mode);
+    assert.ok(!/escalated from free/.test(w.stdout), mode);
+    assert.ok(!fs.existsSync(prompt + '.free.jsonl'), mode);
+    const st = readJson(path.join(dir, 'balancer-state.json'));
+    assert.strictEqual(st.breakers[FREE_M].failures, 1, mode);
+  }
+});
+
+test('free: model_gone run is cooled for an hour and escalates', () => {
+  const { dir, prompt } = mkRepo();
+  const e = freeEnv(dir, { FAKE_FAIL_MODEL: FREE_M, FAKE_FAIL_LOG: path.join(FX, 'logs', 'opencode-failure.jsonl') });
+  relay(['start', AGENT, prompt], dir, e);
+  const w = relay(['wait', prompt], dir, e);
+  assert.match(w.stdout, new RegExp(`escalated from free \\(${FREE_M}: model_gone\\)`));
+  const st = readJson(path.join(dir, 'balancer-state.json'));
+  assert.strictEqual(st.modelCooldowns[FREE_M].until, NOW + 3600 * 1000);
+  assert.strictEqual(st.providers && st.providers.opencode && st.providers.opencode.cooldownUntil, undefined);
+});

@@ -118,6 +118,19 @@ async function safePick(ctx, agent, opts) {
   }
 }
 
+// Detached worker that waits for a provider to recover (see deferred()).
+function spawnDeferred(agent, cwd, prompt) {
+  const out = fs.openSync(prompt + '.err', 'w');
+  const w = cp.spawn(process.execPath, [__filename, '_deferred', agent, prompt], {
+    cwd, detached: true, stdio: ['ignore', out, out], env: childEnv(cwd, 'claude'),
+  });
+  fs.closeSync(out);
+  w.unref();
+  fs.writeFileSync(prompt + '.pid', w.pid + '\n');
+  fs.writeFileSync(prompt + '.provider', 'deferred\n');
+  return w;
+}
+
 async function start(agent, prompt) {
   if (!agent || !prompt) { console.log(USAGE); return 2; }
   let ok = false;
@@ -145,14 +158,7 @@ async function start(agent, prompt) {
   fs.writeFileSync(prompt + '.agent', agent + '\n');
 
   if (verdict === 'wait') {
-    const out = fs.openSync(prompt + '.err', 'w');
-    const w = cp.spawn(process.execPath, [__filename, '_deferred', agent, prompt], {
-      cwd, detached: true, stdio: ['ignore', out, out], env: childEnv(cwd, 'claude'),
-    });
-    fs.closeSync(out);
-    w.unref();
-    fs.writeFileSync(prompt + '.pid', w.pid + '\n');
-    fs.writeFileSync(prompt + '.provider', 'deferred\n');
+    const w = spawnDeferred(agent, cwd, prompt);
     console.log(`started pid ${w.pid} agent=${agent} provider=deferred`);
     console.log(`relay: both subscriptions limited, deferred until ${d.until ? new Date(d.until).toISOString() : 'unknown'}`);
     return 0;
@@ -172,7 +178,7 @@ async function deferred(agent, prompt) {
   let d;
   for (;;) {
     try { await engine.waitReset(ctx, { maxSeconds: Infinity }); } catch { await ctx.sleep(30000); }
-    d = await safePick(ctx, agent);
+    d = await safePick(ctx, agent, { excludeFree: fs.existsSync(prompt + '.escalated') });
     if (d.verdict !== 'wait') break;
   }
   const child = launch(d, { agent, cwd, prompt, cfg: ctx.cfg });
@@ -203,17 +209,55 @@ function repoDelta(base, cwd) {
   return out.join('\n');
 }
 
+// A finished free run without a report is recorded against its model and, once per prompt, re-run
+// on the normal lanes. Returns null (nothing to do), {recorded} (recorded, no escalation) or {pid}.
+async function maybeEscalate(prompt, cwd) {
+  if (readText(prompt + '.provider').trim() !== 'free') return null;
+  const base = readText(prompt + '.jsonl').split('\n').filter(Boolean);
+  if (extractReport(base).report) return null;
+  const ctx = engine.makeCtx();
+  if (!ctx.cfg.free_lane.escalate_on_failure || fs.existsSync(prompt + '.escalated')) return null;
+  const agent = readText(prompt + '.agent').trim();
+  const model = readText(prompt + '.model').trim();
+  let summary;
+  try {
+    summary = engine.recordRun(ctx, { provider: 'free', model, agent: agent || 'unknown', logFile: prompt + '.jsonl', errFile: prompt + '.err', extraFailure: true });
+  } catch { return null; }
+  const outcome = (/^balancer: free \S+ (\w+)/.exec(summary) || [])[1] || 'failure';
+  const d = await safePick(ctx, agent, { excludeFree: true });
+  const verdict = d.verdict === 'wait' || d.verdict === 'paygo' ? d.verdict : d.verdict === 'claude' ? 'claude' : 'opencode';
+  if (verdict !== 'wait' && !onPath(binFor(providerOf(verdict)))) return { recorded: summary };
+  fs.writeFileSync(prompt + '.escalated', `${model} ${outcome} -> ${verdict}\n`);
+  for (const ext of ['jsonl', 'err']) {
+    try { fs.renameSync(`${prompt}.${ext}`, `${prompt}.free.${ext}`); } catch { /* best effort */ }
+  }
+  process.stderr.write(`relay: free run ${model} ended with ${outcome}; escalating to ${verdict}\n`);
+  if (verdict === 'wait') return { pid: spawnDeferred(agent, cwd, prompt).pid };
+  const child = launch({ verdict, model: d.model }, { agent, cwd, prompt, cfg: ctx.cfg });
+  child.unref();
+  fs.writeFileSync(prompt + '.pid', child.pid + '\n');
+  return { pid: child.pid };
+}
+
 async function wait(prompt) {
   if (!prompt) { console.log(USAGE); return 2; }
-  const pid = Number(readText(prompt + '.pid').trim());
+  let pid = Number(readText(prompt + '.pid').trim());
   if (!pid) { console.log(`relay-failure: no pid file for ${prompt}`); return 2; }
   const secs = Number(process.env.BALANCER_RELAY_WAIT_SECONDS || 570);
   const deadline = Date.now() + secs * 1000;
-  while (alive(pid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
-  if (alive(pid)) { console.log('RUNNING'); return 0; }
+  const cwd = process.cwd();
+  let recorded = null; // summary of a free run already recorded by a failed escalation attempt
+  for (;;) {
+    while (alive(pid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+    if (alive(pid)) { console.log('RUNNING'); return 0; }
+    const next = await maybeEscalate(prompt, cwd);
+    if (!next) break;
+    if (next.recorded) recorded = next.recorded;
+    if (!next.pid) break;
+    pid = next.pid;
+  }
 
   console.log('DONE');
-  const cwd = process.cwd();
   let provider = readText(prompt + '.provider', 'opencode').trim();
   if (!['claude', 'free'].includes(provider)) provider = 'opencode';
   const model = provider === 'free' ? readText(prompt + '.model').trim() : undefined;
@@ -245,10 +289,13 @@ async function wait(prompt) {
   console.log(repoDelta(base, cwd));
   try {
     const ctx = engine.makeCtx();
-    console.log(engine.recordRun(ctx, {
+    if (recorded) console.log(recorded);
+    else console.log(engine.recordRun(ctx, {
       provider, model, agent: agent || 'unknown', logFile: prompt + '.jsonl', errFile: prompt + '.err', extraFailure: !report,
     }));
   } catch { /* reactive bookkeeping never fails the relay */ }
+  const esc = /^(\S+) (\S+) -> (\S+)$/.exec(readText(prompt + '.escalated').trim());
+  if (esc) console.log(`relay: escalated from free (${esc[1]}: ${esc[2]}) to ${esc[3]}`);
   console.log(`relay: ${provider} (log: ${prompt}.jsonl)`);
   return 0;
 }
