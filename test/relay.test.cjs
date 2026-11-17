@@ -118,7 +118,7 @@ test('start/wait with claude: acceptEdits + allow-list, never --agent', () => {
   assert.match(lastLine(w.stdout), /^relay: claude/);
   const argv = readJson(path.join(dir, 'argv.json')).argv;
   assert.strictEqual(argv[0], '-p');
-  assert.ok(argv.includes(prompt), 'message names the prompt path');
+  assert.ok(argv.some((a) => a.includes(prompt)), 'message names the prompt path');
   assert.ok(!argv.includes('--agent'));
   assert.strictEqual(argv[argv.indexOf('--permission-mode') + 1], 'acceptEdits');
   const i = argv.indexOf('--allowedTools');
@@ -134,7 +134,9 @@ test('claude.agent_prompt_dir supplies --append-system-prompt without frontmatte
   fs.writeFileSync(path.join(agents, 'gsd-executor.md'), '---\nname: x\n---\nBODY TEXT\n');
   const cfg = path.join(dir, 'cfg.json');
   fs.writeFileSync(cfg, JSON.stringify({ claude: { agent_prompt_dir: agents }, lanes: { pinned_to_claude: ['gsd-executor'] } }));
-  relay(['start', AGENT, prompt], dir, env(dir, { BALANCER_CONFIG: cfg }));
+  const e = env(dir, { BALANCER_CONFIG: cfg });
+  relay(['start', AGENT, prompt], dir, e);
+  relay(['wait', prompt], dir, e);
   const argv = readJson(path.join(dir, 'argv.json')).argv;
   const v = argv[argv.indexOf('--append-system-prompt') + 1];
   assert.match(v, /BODY TEXT/);
