@@ -74,7 +74,9 @@ function providerArgs(provider, { agent, cwd, prompt, cfg, paygo }) {
       '--permission-mode', c.permission_mode];
     const body = agentBody(cfg, agent);
     if (body) args.push('--append-system-prompt', body);
-    args.push('--allowedTools', ...c.allowed_tools, '--add-dir', cwd);
+    args.push('--allowedTools', ...c.allowed_tools);
+    if (Array.isArray(c.disallowed_tools) && c.disallowed_tools.length) args.push('--disallowedTools', ...c.disallowed_tools);
+    args.push('--add-dir', cwd);
     return args;
   }
   const msg = `Execute the task in the attached file exactly as written. It is your full spawn prompt from the orchestrator. Finish with the structured report it asks for. ${RULES}`;

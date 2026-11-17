@@ -40,13 +40,21 @@
     "effort": "medium",
     "permission_mode": "acceptEdits",
     "allowed_tools": [
-      "Bash(git:*)",
-      "Bash(node:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(node --test:*)",
+      "Bash(npm test:*)",
       "Read",
       "Write",
       "Edit"
     ],
-    "agent_prompt_dir": null
+    "agent_prompt_dir": null,
+    "disallowed_tools": [
+      "Bash(git push:*)"
+    ]
   },
   "opencode": {
     "agent_models": {}

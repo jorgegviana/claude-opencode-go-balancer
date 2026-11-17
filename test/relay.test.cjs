@@ -122,7 +122,14 @@ test('start/wait with claude: acceptEdits + allow-list, never --agent', () => {
   assert.ok(!argv.includes('--agent'));
   assert.strictEqual(argv[argv.indexOf('--permission-mode') + 1], 'acceptEdits');
   const i = argv.indexOf('--allowedTools');
-  assert.deepStrictEqual(argv.slice(i + 1, i + 6), ['Bash(git:*)', 'Bash(node:*)', 'Read', 'Write', 'Edit']);
+  const allowed = [];
+  for (let k = i + 1; k < argv.length && !argv[k].startsWith('--'); k++) allowed.push(argv[k]);
+  assert.ok(allowed.includes('Read') && allowed.includes('Edit') && allowed.includes('Write'));
+  assert.ok(allowed.includes('Bash(git commit:*)') && allowed.includes('Bash(node --test:*)'));
+  assert.ok(!allowed.includes('Bash(node:*)'), 'node:* would allow node -e arbitrary code');
+  assert.ok(!allowed.includes('Bash(git:*)'), 'git:* would allow git push');
+  const j = argv.indexOf('--disallowedTools');
+  assert.ok(j >= 0 && argv[j + 1] === 'Bash(git push:*)', 'git push is explicitly denied');
   assert.ok(argv.includes('stream-json') && argv.includes('--verbose'));
   assert.ok(!argv.includes('bypassPermissions'));
 });

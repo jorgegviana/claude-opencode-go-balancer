@@ -162,11 +162,13 @@ opencode exactly as before.
 ## Claude permissions
 
 Headless Claude runs with `--permission-mode acceptEdits` and
-`--allowedTools Bash(git:*) Bash(node:*) Read Write Edit`; it never gets `--agent` (a project agent
+`--allowedTools` limited to `git status/diff/log/add/commit`, `node --test`, `npm test`, Read, Write and Edit, plus
+`--disallowedTools Bash(git push:*)`. Broad entries such as `Bash(node:*)` or `Bash(git:*)` are deliberately absent:
+they allow `node -e` (arbitrary code) and `git push`. It never gets `--agent` (a project agent
 file may itself be the relay agent, which would recurse). To supply the agent's instructions set
 `claude.agent_prompt_dir` (e.g. `~/.claude/agents`): `<logical agent>.md` is read, frontmatter
 stripped, and passed with `--append-system-prompt`. To widen permissions, edit
-`claude.allowed_tools` or `claude.permission_mode` in your config; that is an explicit choice.
+`claude.allowed_tools`, `claude.disallowed_tools` or `claude.permission_mode` in your config; that is an explicit choice.
 
 ## Security
 
