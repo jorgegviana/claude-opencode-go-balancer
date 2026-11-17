@@ -127,7 +127,7 @@ Claude Code only exposes its rate limits to the `statusLine` command. If you alr
 Change `statusLine.command` in `~/.claude/settings.json` to:
 
 ```
-node /home/jviana/git/jorgegviana/claude-opencode-go-balancer/bin/claude-usage-statusline.cjs --chain node /home/jviana/.claude/hooks/gsd-statusline.js
+node /path/to/claude-opencode-go-balancer/bin/claude-usage-statusline.cjs --chain <your existing statusLine command>
 ```
 
 It pipes the same stdin to the chained command, prints its output, then ` | claude 5h 42% 7d 10%`.
