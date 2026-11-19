@@ -1,0 +1,4 @@
+#!/bin/sh
+# Blocks a commit that contains a key-shaped string or the real OpenCode key.
+# Enable once per clone: npm run install-hooks
+exec node "$(git rev-parse --show-toplevel)/scripts/scan-secrets.cjs"

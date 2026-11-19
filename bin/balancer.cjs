@@ -4,12 +4,16 @@ const engine = require('../lib/engine.cjs');
 const { readRtkGain } = require('../lib/rtk.cjs');
 const { normalizeModel, freeModelStatus } = require('../lib/free.cjs');
 const { cachedCatalogs, catalogsFor } = require('../lib/catalog.cjs');
+const { readLog, summarize } = require('../lib/log.cjs');
+const { hardStop } = require('../lib/config.cjs');
+const R = require('../lib/reactive.cjs');
 
 const iso = (ms) => new Date(ms).toISOString();
 
 function fmtProvider(label, p, score, extra = '') {
   const out = [];
-  const head = score.status === 'eligible' ? `eligible headroom ${score.headroom.toFixed(1)}`
+  const runs = Number.isFinite(score.runs) ? `, about ${score.runs.toFixed(0)} runs left` : '';
+  const head = score.status === 'eligible' ? `eligible headroom ${score.headroom.toFixed(1)}${runs}`
     : score.status === 'ineligible' ? `ineligible until ${iso(score.eligibleAt)}` : 'unknown';
   out.push(`${label}: ${head}${extra}`);
   for (const w of p.windows) out.push(`  ${w.name} ${w.used}% resets ${iso(w.resetsAt)}`);
@@ -60,16 +64,21 @@ async function cmdStatus(ctx) {
   const age = data.claudeTs ? ` (data age ${Math.round((now - data.claudeTs) / 60000)}m)` : ' (no statusline data yet)';
   lines.push(fmtProvider('claude', data.claude, scores.claude, age));
   lines.push(`last pick: ${state.lastPick || 'none'}`);
+  const fl = ['opencode', 'claude'].map((p) => `${p} ${R.countInflight(state, p, ctx.cfg, now)}`).join(', ');
+  lines.push(`in flight: ${fl}; hard stop: opencode ${hardStop(ctx.cfg, 'opencode')}%, claude ${hardStop(ctx.cfg, 'claude')}%`);
+  if (ctx.cfg.paygo.enabled) lines.push(`paygo: ${R.paygoRuns(state, now).length} of ${ctx.cfg.paygo.max_runs_per_day ?? 'unlimited'} runs in the last 24 h`);
   lines.push(...freeLines(ctx, state, now));
   const gain = readRtkGain();
   if (gain) lines.push(gain);
-  try { engine.saveState(ctx, state); } catch { /* status is read-only in spirit */ }
+  try { engine.saveCaches(ctx, state); } catch { /* status is read-only in spirit */ }
   console.log(lines.join('\n'));
 }
 
-async function cmdPick(ctx, agent) {
-  if (!agent) { console.error('usage: balancer pick <agent>'); return 2; }
-  const d = await engine.pick(ctx, agent);
+async function cmdPick(ctx, args) {
+  const dryRun = args.includes('--dry-run');
+  const agent = args.find((a) => !a.startsWith('--'));
+  if (!agent) { console.error('usage: balancer pick <agent> [--dry-run]'); return 2; }
+  const d = await engine.pick(ctx, agent, { dryRun });
   const until = d.until ? ' ' + iso(d.until) : '';
   console.log(d.verdict === 'wait' ? `wait${until}` : d.verdict === 'free' ? `free ${d.model}` : d.verdict);
   console.error(`balancer: ${d.reason}`);
@@ -110,7 +119,7 @@ function cmdModels(ctx, args) {
   }
   const providers = [...new Set(['opencode', ...catalogsFor(configured.map(([m]) => m))])];
   const cats = engine.loadCatalogs(ctx, state, providers, refresh);
-  engine.saveState(ctx, state);
+  engine.saveCaches(ctx, state);
   let unavailable = 0;
   for (const p of providers) {
     if (cats[p]) console.log(`catalog ${p}: ${Object.keys(cats[p]).length} models`);
@@ -129,6 +138,27 @@ function cmdModels(ctx, args) {
   return unavailable ? 1 : 0;
 }
 
+// Outcome counts from the decision log, plus the learned cost per run.
+function cmdStats(ctx) {
+  const { providers, agents } = summarize(readLog(ctx.paths.log));
+  const row = (k, v) => {
+    const done = v.success + v.failure + v.limit + v.model_gone;
+    const rate = done ? ` (${Math.round((v.success / done) * 100)}% success)` : '';
+    return `  ${k}: ${v.picks} picks, ${v.success} success, ${v.failure} failure, ${v.limit} limit, ${v.model_gone} model_gone${rate}`;
+  };
+  console.log('by provider:' + (Object.keys(providers).length ? '' : ' no data yet'));
+  for (const k of Object.keys(providers).sort()) console.log(row(k, providers[k]));
+  console.log('by agent and provider:' + (Object.keys(agents).length ? '' : ' no data yet'));
+  for (const k of Object.keys(agents).sort()) console.log(row(k, agents[k]));
+  const burn = engine.loadState(ctx).burn || {};
+  console.log('usage per run (percent points):' + (Object.keys(burn).length ? '' : ' not measured yet'));
+  for (const [p, b] of Object.entries(burn)) {
+    const ws = Object.entries(b.windows || {}).map(([n, w]) => `${n} ${(w.runs > 0 ? w.delta / w.runs : 0).toFixed(2)}`).join(', ');
+    console.log(`  ${p}: ${ws} (${b.n} runs measured${b.n < ctx.cfg.strategy.min_samples ? `, used from ${ctx.cfg.strategy.min_samples}` : ''})`);
+  }
+  return 0;
+}
+
 async function cmdWaitReset(ctx, args) {
   const i = args.indexOf('--max-seconds');
   const maxSeconds = i >= 0 ? Number(args[i + 1]) : 570;
@@ -144,7 +174,8 @@ async function main(argv, env = process.env) {
   const ctx = engine.makeCtx(env);
   switch (cmd) {
     case 'status': await cmdStatus(ctx); return 0;
-    case 'pick': return cmdPick(ctx, rest[0]);
+    case 'pick': return cmdPick(ctx, rest);
+    case 'stats': return cmdStats(ctx);
     case 'wait-reset': return cmdWaitReset(ctx, rest);
     case 'canary': return cmdCanary(ctx, rest);
     case 'models': return cmdModels(ctx, rest);
@@ -158,7 +189,7 @@ async function main(argv, env = process.env) {
       return 0;
     }
     default:
-      console.error('usage: balancer status | pick <agent> | wait-reset [--max-seconds N] | record <provider> <agent> <log> [<err>] | canary [model...] [--timeout N] | models [--refresh]');
+      console.error('usage: balancer status | pick <agent> [--dry-run] | stats | wait-reset [--max-seconds N] | record <provider> <agent> <log> [<err>] | canary [model...] [--timeout N] | models [--refresh]');
       return 2;
   }
 }

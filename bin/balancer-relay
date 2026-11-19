@@ -3,6 +3,7 @@
 // Generic relay of an agent task to a headless provider chosen by the balancer.
 //   balancer-relay start <agent> <prompt-file>   start in the background (opencode, claude, or deferred)
 //   balancer-relay wait  <prompt-file>           wait up to BALANCER_RELAY_WAIT_SECONDS (570); RUNNING or DONE + report
+//   balancer-relay cancel <prompt-file>          stop a running or deferred run without counting a failure
 // Run from the directory the work belongs to (it may be a git worktree).
 const fs = require('fs');
 const path = require('path');
@@ -12,7 +13,7 @@ const { extractReport } = require('../lib/report.cjs');
 const { logicalAgent } = require('../lib/decide.cjs');
 const { expandHome } = require('../lib/state.cjs');
 
-const USAGE = 'usage: balancer-relay start <agent> <prompt-file> | wait <prompt-file>';
+const USAGE = 'usage: balancer-relay start <agent> <prompt-file> | wait <prompt-file> | cancel <prompt-file>';
 const RULES = 'STANDING RULES from the relay (they override anything softer in the attached file): (a) Never read or write outside the project root. TMPDIR is already set to the project\'s build/tmp: use it for scratch files. Never write to /tmp. Never make backup copies of files anywhere; git is the rollback (use git diff, and git checkout only on files you yourself changed). Do not use git stash. (b) Your final report must be complete even if a step failed: list commits you made, files you left uncommitted, and the raw output lines of every verification command you ran (copy them, do not paraphrase, do not quote numbers from earlier reports). (c) If a command is rejected or blocked, do not stop: report what was blocked and continue with what remains possible.';
 
 const git = (args, cwd) => {
@@ -39,10 +40,21 @@ function repoRoot(cwd) {
   return r ? r.trim() : cwd;
 }
 
-function childEnv(cwd, provider) {
+// Free models are the least trusted lane: they do not get secret-looking environment variables.
+function scrubbed(src, cfg) {
+  const r = (cfg && cfg.relay) || {};
+  if (!r.scrub_env_free) return { ...src };
+  const pats = (r.env_scrub_patterns || []).map((x) => new RegExp(x, 'i'));
+  const keep = new Set(r.env_keep || []);
+  const out = {};
+  for (const [k, v] of Object.entries(src)) if (keep.has(k) || !pats.some((re) => re.test(k))) out[k] = v;
+  return out;
+}
+
+function childEnv(cwd, provider, cfg) {
   const root = repoRoot(cwd);
   const env = {
-    ...process.env,
+    ...(provider === 'free' ? scrubbed(process.env, cfg) : process.env),
     TMPDIR: path.join(root, 'build', 'tmp'),
     XDG_CACHE_HOME: path.join(root, 'build', 'cache'),
     UV_CACHE_DIR: path.join(root, 'build', 'uv-cache'),
@@ -50,7 +62,7 @@ function childEnv(cwd, provider) {
   for (const d of [env.TMPDIR, env.XDG_CACHE_HOME, env.UV_CACHE_DIR]) {
     try { fs.mkdirSync(d, { recursive: true }); } catch { /* best effort */ }
   }
-  if (provider === 'opencode' || provider === 'free') env.OPENCODE_ENABLE_EXA = '1';
+  if (provider !== 'claude') env.OPENCODE_ENABLE_EXA = '1';
   return env;
 }
 
@@ -91,11 +103,14 @@ function spawnProvider(provider, opts) {
   const out = fs.openSync(prompt + '.jsonl', 'w');
   const err = fs.openSync(prompt + '.err', 'w');
   const child = cp.spawn(binFor(provider), providerArgs(provider, opts), {
-    cwd, detached: true, stdio: ['ignore', out, err], env: childEnv(cwd, provider),
+    cwd, detached: true, stdio: ['ignore', out, err], env: childEnv(cwd, provider, opts.cfg),
   });
   fs.closeSync(out);
   fs.closeSync(err);
-  fs.writeFileSync(prompt + '.provider', provider + '\n');
+  // A paygo run is opencode on separate billing: it is recorded as 'paygo', never as the Go subscription.
+  fs.writeFileSync(prompt + '.provider', (opts.paygo ? 'paygo' : provider) + '\n');
+  fs.writeFileSync(prompt + '.launched', Date.now() + '\n');
+  fs.rmSync(prompt + '.recorded', { force: true });
   if (provider === 'free') fs.writeFileSync(prompt + '.model', opts.model + '\n');
   else fs.rmSync(prompt + '.model', { force: true });
   return child;
@@ -113,14 +128,18 @@ async function safePick(ctx, agent, opts) {
   try {
     return await engine.pick(ctx, agent, opts);
   } catch (e) {
-    process.stderr.write(`relay: balancer failed (${String(e && e.message).slice(0, 120)}); using opencode\n`);
-    return { verdict: 'opencode', reason: 'balancer error fallback' };
+    // Pinning is a privacy setting: it holds even when the balancer itself is broken.
+    const pinned = ctx.cfg.lanes.pinned_to_claude.includes(logicalAgent(agent, ctx.cfg));
+    const verdict = pinned ? 'claude' : 'opencode';
+    process.stderr.write(`relay: balancer failed (${String(e && e.message).slice(0, 120)}); using ${verdict}\n`);
+    return { verdict, reason: 'balancer error fallback' };
   }
 }
 
 // Detached worker that waits for a provider to recover (see deferred()).
 function spawnDeferred(agent, cwd, prompt) {
   const out = fs.openSync(prompt + '.err', 'w');
+  for (const ext of ['launched', 'child', 'recorded']) fs.rmSync(`${prompt}.${ext}`, { force: true });
   const w = cp.spawn(process.execPath, [__filename, '_deferred', agent, prompt], {
     cwd, detached: true, stdio: ['ignore', out, out], env: childEnv(cwd, 'claude'),
   });
@@ -142,8 +161,14 @@ async function start(agent, prompt) {
   const verdict = d.verdict === 'wait' || d.verdict === 'paygo' || d.verdict === 'free' ? d.verdict : d.verdict === 'claude' ? 'claude' : 'opencode';
   if (verdict !== 'wait') {
     const bin = binFor(providerOf(verdict));
-    if (!onPath(bin)) { console.log(`relay-failure: ${bin} not on PATH`); return 2; }
+    if (!onPath(bin)) {
+      // Nothing will run: give back the probe and in-flight slot the pick claimed.
+      try { engine.releaseRun(ctx, { provider: providerOf(verdict), agent, model: d.model }); } catch { /* best effort */ }
+      console.log(`relay-failure: ${bin} not on PATH`);
+      return 2;
+    }
   }
+  for (const ext of ['recorded', 'timeout', 'escalated', 'child', 'launched']) fs.rmSync(`${prompt}.${ext}`, { force: true });
   const gitDir = git(['rev-parse', '--git-common-dir'], cwd);
   if (gitDir) {
     const ex = path.resolve(cwd, gitDir.trim(), 'info', 'exclude');
@@ -175,13 +200,22 @@ async function start(agent, prompt) {
 async function deferred(agent, prompt) {
   const cwd = process.cwd();
   const ctx = engine.makeCtx();
+  const esc = /^(\S+) /.exec(readText(prompt + '.escalated'));
+  const opts = { excludeFree: fs.existsSync(prompt + '.escalated'), excludeProvider: esc && esc[1] !== 'free' ? esc[1] : undefined };
   let d;
   for (;;) {
-    try { await engine.waitReset(ctx, { maxSeconds: Infinity }); } catch { await ctx.sleep(30000); }
-    d = await safePick(ctx, agent, { excludeFree: fs.existsSync(prompt + '.escalated') });
+    try { await engine.waitReset(ctx, { maxSeconds: Infinity, agent }); } catch { await ctx.sleep(30000); }
+    d = await safePick(ctx, agent, opts);
     if (d.verdict !== 'wait') break;
+    // pick can still say wait for reasons waitReset does not see (catalog, paygo cap, exclusion):
+    // sleep until its estimate instead of spinning.
+    const ms = Number.isFinite(d.until) ? d.until - ctx.now() : Infinity;
+    await ctx.sleep(Math.max(1000, Math.min(ms, ctx.cfg.wait_max_sleep_seconds * 1000)));
   }
   const child = launch(d, { agent, cwd, prompt, cfg: ctx.cfg });
+  fs.writeFileSync(prompt + '.child', child.pid + '\n');
+  // Cancelling or timing out the worker must also stop the provider it started.
+  process.on('SIGTERM', () => { try { process.kill(-child.pid, 'SIGTERM'); } catch { /* gone */ } process.exit(143); });
   await new Promise((resolve) => { child.on('exit', resolve); child.on('error', resolve); });
   return 0;
 }
@@ -209,32 +243,73 @@ function repoDelta(base, cwd) {
   return out.join('\n');
 }
 
-// A finished free run without a report is recorded against its model and, once per prompt, re-run
-// on the normal lanes. Returns null (nothing to do), {recorded} (recorded, no escalation) or {pid}.
-async function maybeEscalate(prompt, cwd) {
-  if (readText(prompt + '.provider').trim() !== 'free') return null;
+// Stop a run: the recorded pid (provider, or deferred worker) and the worker's provider child.
+// Providers are spawned detached, so each is its own process group.
+// A pid from a sidecar may have been reused by an unrelated process: where /proc is available, only
+// processes whose command line names this prompt file are signalled.
+function ours(pid, prompt) {
+  let cmd;
+  try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch { return true; }
+  return cmd.includes(path.basename(prompt));
+}
+
+async function killRun(prompt, pid) {
+  const pids = [pid, Number(readText(prompt + '.child').trim())].filter((n) => Number.isInteger(n) && n > 1 && ours(n, prompt));
+  const signal = (sig) => { for (const n of pids) { try { process.kill(-n, sig); } catch { try { process.kill(n, sig); } catch { /* gone */ } } } };
+  signal('SIGTERM');
+  for (let i = 0; i < 12 && pids.some(alive); i++) await new Promise((r) => setTimeout(r, 250));
+  if (pids.some(alive)) { signal('SIGKILL'); await new Promise((r) => setTimeout(r, 250)); }
+}
+
+// Fresh usage for learning the cost of the run; never fails the relay.
+async function usageNow(ctx) {
+  try { return await engine.gather(ctx, engine.loadState(ctx), { bypassCache: true }); } catch { return null; }
+}
+
+// A finished run without a report is recorded and, at most once per prompt, re-run on another lane:
+// a free run on the normal lanes, an opencode or claude run on the other subscription when its
+// outcome is listed in lanes.escalate_on. Returns null (nothing to do), {recorded} (recorded, no
+// escalation) or {pid} (a new run to wait for).
+async function maybeEscalate(prompt, cwd, ctx, forceFailure) {
+  const from = readText(prompt + '.provider').trim();
+  if (!['free', 'opencode', 'claude'].includes(from)) return null;
   const base = readText(prompt + '.jsonl').split('\n').filter(Boolean);
-  if (extractReport(base).report) return null;
-  const ctx = engine.makeCtx();
-  if (!ctx.cfg.free_lane.escalate_on_failure || fs.existsSync(prompt + '.escalated')) return null;
+  if (extractReport(base).report && !forceFailure) return null;
+  const cfg = ctx.cfg;
+  if (fs.existsSync(prompt + '.escalated')) return null;
+  if (from === 'free' ? !cfg.free_lane.escalate_on_failure : !(cfg.lanes.escalate_on || []).length) return null;
   const agent = readText(prompt + '.agent').trim();
   const model = readText(prompt + '.model').trim();
-  let summary;
+  let rec;
   try {
-    summary = engine.recordRun(ctx, { provider: 'free', model, agent: agent || 'unknown', logFile: prompt + '.jsonl', errFile: prompt + '.err', extraFailure: true });
+    rec = engine.recordRunDetailed(ctx, {
+      provider: from, model, agent: agent || 'unknown', logFile: prompt + '.jsonl', errFile: prompt + '.err', extraFailure: true,
+      usage: from === 'free' ? null : await usageNow(ctx),
+    });
   } catch { return null; }
-  const outcome = (/^balancer: free \S+ (\w+)/.exec(summary) || [])[1] || 'failure';
-  const d = await safePick(ctx, agent, { excludeFree: true });
-  const verdict = d.verdict === 'wait' || d.verdict === 'paygo' ? d.verdict : d.verdict === 'claude' ? 'claude' : 'opencode';
-  if (verdict !== 'wait' && !onPath(binFor(providerOf(verdict)))) return { recorded: summary };
-  fs.writeFileSync(prompt + '.escalated', `${model} ${outcome} -> ${verdict}\n`);
-  for (const ext of ['jsonl', 'err']) {
-    try { fs.renameSync(`${prompt}.${ext}`, `${prompt}.free.${ext}`); } catch { /* best effort */ }
+  const keep = { recorded: rec.summary };
+  if (from !== 'free' && !cfg.lanes.escalate_on.includes(rec.outcome)) return keep;
+  const opts = { excludeFree: true, excludeProvider: from === 'free' ? undefined : from };
+  const map = (d) => (d.verdict === 'wait' || d.verdict === 'paygo' ? d.verdict : d.verdict === 'claude' ? 'claude' : 'opencode');
+  // Look first without claiming anything: a pinned agent, or nothing else available, means no escalation.
+  if (from !== 'free') {
+    let peek;
+    try { peek = map(await engine.pick(ctx, agent, { ...opts, dryRun: true })); } catch { return keep; }
+    if (peek === 'wait' || peek === from) return keep;
   }
-  process.stderr.write(`relay: free run ${model} ended with ${outcome}; escalating to ${verdict}\n`);
+  const d = await safePick(ctx, agent, opts);
+  const verdict = map(d);
+  if (from !== 'free' && (verdict === 'wait' || verdict === from)) return keep;
+  if (verdict !== 'wait' && !onPath(binFor(providerOf(verdict)))) return keep;
+  fs.writeFileSync(prompt + '.escalated', `${from} ${from === 'free' ? model : rec.key} ${rec.outcome} -> ${verdict}\n`);
+  for (const ext of ['jsonl', 'err']) {
+    try { fs.renameSync(`${prompt}.${ext}`, `${prompt}.${from}.${ext}`); } catch { /* best effort */ }
+  }
+  process.stderr.write(`relay: ${from} run ${from === 'free' ? model : rec.key} ended with ${rec.outcome}; escalating to ${verdict}\n`);
   if (verdict === 'wait') return { pid: spawnDeferred(agent, cwd, prompt).pid };
-  const child = launch({ verdict, model: d.model }, { agent, cwd, prompt, cfg: ctx.cfg });
+  const child = launch({ verdict, model: d.model }, { agent, cwd, prompt, cfg });
   child.unref();
+  fs.rmSync(prompt + '.child', { force: true });
   fs.writeFileSync(prompt + '.pid', child.pid + '\n');
   return { pid: child.pid };
 }
@@ -246,24 +321,40 @@ async function wait(prompt) {
   const secs = Number(process.env.BALANCER_RELAY_WAIT_SECONDS || 570);
   const deadline = Date.now() + secs * 1000;
   const cwd = process.cwd();
-  let recorded = null; // summary of a free run already recorded by a failed escalation attempt
+  const ctx = engine.makeCtx();
+  const maxMs = ctx.cfg.relay.max_run_minutes * 60000;
+  // The outcome of a run is recorded exactly once; later wait calls replay the stored line.
+  let recorded = readText(prompt + '.recorded').trim() || null;
   for (;;) {
-    while (alive(pid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+    while (alive(pid) && Date.now() < deadline) {
+      // The clock starts when the provider is launched, so time spent deferred does not count.
+      const launched = Number(readText(prompt + '.launched').trim());
+      if (maxMs > 0 && launched && Date.now() - launched > maxMs) {
+        await killRun(prompt, pid);
+        fs.writeFileSync(prompt + '.timeout', `${ctx.cfg.relay.max_run_minutes}\n`);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
     if (alive(pid)) { console.log('RUNNING'); return 0; }
-    const next = await maybeEscalate(prompt, cwd);
+    if (recorded) break;
+    const next = await maybeEscalate(prompt, cwd, ctx, fs.existsSync(prompt + '.timeout'));
     if (!next) break;
     if (next.recorded) recorded = next.recorded;
     if (!next.pid) break;
     pid = next.pid;
+    fs.rmSync(prompt + '.timeout', { force: true });
   }
 
   console.log('DONE');
   let provider = readText(prompt + '.provider', 'opencode').trim();
-  if (!['claude', 'free'].includes(provider)) provider = 'opencode';
+  if (!['claude', 'free', 'paygo'].includes(provider)) provider = 'opencode';
   const model = provider === 'free' ? readText(prompt + '.model').trim() : undefined;
   const agent = readText(prompt + '.agent').trim();
   const base = readText(prompt + '.base').trim();
+  const timedOut = readText(prompt + '.timeout').trim();
   const { report, errors, commands } = extractReport(readText(prompt + '.jsonl').split('\n').filter(Boolean));
+  if (timedOut) console.log(`relay-failure: timeout after ${timedOut} min (run killed; relay.max_run_minutes)`);
   if (report) {
     console.log('----- FINAL REPORT -----');
     console.log(report);
@@ -288,15 +379,36 @@ async function wait(prompt) {
   console.log('----- ORCHESTRATOR CHECK (repo state, measured by the relay) -----');
   console.log(repoDelta(base, cwd));
   try {
-    const ctx = engine.makeCtx();
-    if (recorded) console.log(recorded);
-    else console.log(engine.recordRun(ctx, {
-      provider, model, agent: agent || 'unknown', logFile: prompt + '.jsonl', errFile: prompt + '.err', extraFailure: !report,
-    }));
+    if (!recorded) {
+      recorded = engine.recordRun(ctx, {
+        provider, model, agent: agent || 'unknown', logFile: prompt + '.jsonl', errFile: prompt + '.err',
+        extraFailure: !report || !!timedOut, usage: provider === 'opencode' || provider === 'claude' ? await usageNow(ctx) : null,
+      });
+    }
+    console.log(recorded);
+    fs.writeFileSync(prompt + '.recorded', recorded + '\n');
   } catch { /* reactive bookkeeping never fails the relay */ }
-  const esc = /^(\S+) (\S+) -> (\S+)$/.exec(readText(prompt + '.escalated').trim());
-  if (esc) console.log(`relay: escalated from free (${esc[1]}: ${esc[2]}) to ${esc[3]}`);
+  const esc = /^(\S+) (\S+) (\S+) -> (\S+)$/.exec(readText(prompt + '.escalated').trim());
+  if (esc) console.log(`relay: escalated from ${esc[1]} (${esc[2]}: ${esc[3]}) to ${esc[4]}`);
   console.log(`relay: ${provider} (log: ${prompt}.jsonl)`);
+  return 0;
+}
+
+// Stop a running or deferred run. Nothing is counted against the provider or the model.
+async function cancel(prompt) {
+  if (!prompt) { console.log(USAGE); return 2; }
+  const pid = Number(readText(prompt + '.pid').trim());
+  if (!pid) { console.log(`relay-failure: no pid file for ${prompt}`); return 2; }
+  if (!alive(pid)) { console.log(`relay: not running (pid ${pid})`); return 0; }
+  await killRun(prompt, pid);
+  const provider = readText(prompt + '.provider').trim();
+  try {
+    if (provider !== 'deferred') {
+      engine.releaseRun(engine.makeCtx(), { provider, agent: readText(prompt + '.agent').trim(), model: readText(prompt + '.model').trim() });
+    }
+  } catch { /* best effort */ }
+  fs.writeFileSync(prompt + '.recorded', 'balancer: cancelled (not recorded)\n');
+  console.log(`cancelled pid ${pid}${alive(pid) ? ' (still alive)' : ''}`);
   return 0;
 }
 
@@ -304,6 +416,7 @@ async function main(argv) {
   const [cmd, a, b] = argv;
   if (cmd === 'start') return start(a, b);
   if (cmd === 'wait') return wait(a);
+  if (cmd === 'cancel') return cancel(a);
   if (cmd === '_deferred') return deferred(a, b);
   console.log(USAGE);
   return 2;

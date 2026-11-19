@@ -1,5 +1,9 @@
 {
   "hard_stop_percent": 90,
+  "reserve_percent": {
+    "claude": 10,
+    "opencode": 0
+  },
   "hysteresis_points": 10,
   "use_it_or_lose_it_minutes": 30,
   "use_it_or_lose_it_bonus": 15,
@@ -18,7 +22,22 @@
     "opencode_agent_prefix": "go-",
     "pinned_to_claude": [],
     "balanced_agents": "*",
-    "default_lane": "opencode"
+    "default_lane": "opencode",
+    "preferences": {},
+    "escalate_on": [
+      "limit",
+      "model_gone"
+    ]
+  },
+  "inflight": {
+    "ttl_minutes": 30,
+    "cost_points": 2
+  },
+  "strategy": {
+    "runs_remaining": true,
+    "min_samples": 5,
+    "hysteresis_runs": 2,
+    "burn_decay": 0.9
   },
   "reactive": {
     "backoff_initial_seconds": 30,
@@ -38,10 +57,35 @@
     "model_gone_patterns": [
       "model[ _-]?not[ _-]?found",
       "model_not_found",
-      "\\b404\\b",
+      "\\b(HTTP|status(Code)?)\\W{0,3}404\\b",
       "model\\b[^\\n]{0,120}does not exist",
-      "retired"
+      "model\\b[^\\n]{0,120}retired"
     ]
+  },
+  "free_lane": {
+    "enabled": false,
+    "models": [
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/glm-5.3-flash-free",
+      "opencode/mimo-v2.6-flash-free",
+      "opencode/minimax-m3.1-flash-free",
+      "opencode/longcat-2.5-free",
+      "opencode/hy4-flash-free",
+      "opencode/big-pickle"
+    ],
+    "agents": [],
+    "canary_ttl_days": 7,
+    "canary_timeout_seconds": 300,
+    "escalate_on_failure": true,
+    "renew_canary_on_success": true,
+    "require_toolcall": true,
+    "rotate": false,
+    "spend_guard": {}
+  },
+  "catalog": {
+    "ttl_seconds": 600,
+    "timeout_seconds": 20,
+    "check_agent_models": true
   },
   "claude": {
     "model": "sonnet",
@@ -59,37 +103,34 @@
       "Write",
       "Edit"
     ],
-    "agent_prompt_dir": null,
     "disallowed_tools": [
       "Bash(git push:*)"
-    ]
+    ],
+    "agent_prompt_dir": null
   },
   "opencode": {
     "agent_models": {}
   },
   "paygo": {
     "enabled": false,
-    "model": null
+    "model": null,
+    "max_runs_per_day": 10
   },
-  "free_lane": {
-    "enabled": false,
-    "models": [
-      "opencode/deepseek-v4.1-flash-free",
-      "opencode/glm-5.3-flash-free",
-      "opencode/mimo-v2.6-flash-free",
-      "opencode/minimax-m3.1-flash-free",
-      "opencode/longcat-2.5-free",
-      "opencode/hy4-flash-free",
-      "opencode/big-pickle"
+  "relay": {
+    "max_run_minutes": 180,
+    "scrub_env_free": true,
+    "env_scrub_patterns": [
+      "KEY",
+      "TOKEN",
+      "SECRET",
+      "PASSWORD",
+      "PASSWD",
+      "CREDENTIAL"
     ],
-    "agents": [],
-    "canary_ttl_days": 7,
-    "canary_timeout_seconds": 300,
-    "escalate_on_failure": true
+    "env_keep": []
   },
-  "catalog": {
-    "ttl_seconds": 600,
-    "timeout_seconds": 20,
-    "check_agent_models": true
+  "log": {
+    "enabled": true,
+    "max_bytes": 5242880
   }
 }
