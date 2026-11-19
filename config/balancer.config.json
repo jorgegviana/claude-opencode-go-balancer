@@ -35,7 +35,7 @@
   },
   "strategy": {
     "runs_remaining": true,
-    "min_samples": 5,
+    "min_samples": 10,
     "hysteresis_runs": 2,
     "burn_decay": 0.9
   },
@@ -80,6 +80,10 @@
     "renew_canary_on_success": true,
     "require_toolcall": true,
     "rotate": false,
+    "discover": false,
+    "discover_providers": [
+      "opencode"
+    ],
     "spend_guard": {}
   },
   "catalog": {
@@ -127,7 +131,8 @@
       "PASSWD",
       "CREDENTIAL"
     ],
-    "env_keep": []
+    "env_keep": [],
+    "wrap_command": []
   },
   "log": {
     "enabled": true,

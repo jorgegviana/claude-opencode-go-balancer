@@ -2,7 +2,7 @@
 'use strict';
 const engine = require('../lib/engine.cjs');
 const { readRtkGain } = require('../lib/rtk.cjs');
-const { normalizeModel, freeModelStatus } = require('../lib/free.cjs');
+const { normalizeModel, freeModelStatus, freeCandidates } = require('../lib/free.cjs');
 const { cachedCatalogs, catalogsFor } = require('../lib/catalog.cjs');
 const { readLog, summarize } = require('../lib/log.cjs');
 const { hardStop } = require('../lib/config.cjs');
@@ -29,9 +29,7 @@ function freeLines(ctx, state, now) {
   const f = ctx.cfg.free_lane;
   const lines = [f.enabled ? `free lane: enabled (agents: ${(f.agents || []).join(', ') || 'none'})` : 'free lane: disabled'];
   const catalogs = cachedCatalogs(state);
-  for (const raw of f.models || []) {
-    const model = normalizeModel(raw);
-    if (!model) continue;
+  for (const model of freeCandidates(ctx.cfg, catalogs)) {
     const c = state.canary && state.canary[model];
     const parts = [c ? `canary ${c.ok ? 'PASS' : `FAIL (${c.detail || 'no detail'})`} ${age(now - c.ts)} ago` : 'no canary'];
     const st = freeModelStatus(model, { cfg: ctx.cfg, state, catalogs, now });
@@ -98,7 +96,8 @@ function cmdCanary(ctx, args) {
       names.push(m);
     }
   }
-  const models = names.length ? names : (ctx.cfg.free_lane.models || []).map(normalizeModel).filter(Boolean);
+  // No names: every candidate, including discovered catalog models when free_lane.discover is on.
+  const models = names.length ? names : freeCandidates(ctx.cfg, cachedCatalogs(engine.loadState(ctx)));
   let failed = 0;
   for (const r of engine.runCanaries(ctx, models, { timeoutSeconds })) {
     if (r.ok) console.log(`canary ${r.model}: PASS`);
@@ -144,7 +143,10 @@ function cmdStats(ctx) {
   const row = (k, v) => {
     const done = v.success + v.failure + v.limit + v.model_gone;
     const rate = done ? ` (${Math.round((v.success / done) * 100)}% success)` : '';
-    return `  ${k}: ${v.picks} picks, ${v.success} success, ${v.failure} failure, ${v.limit} limit, ${v.model_gone} model_gone${rate}`;
+    const judged = v.accept + v.reject;
+    const acc = judged ? `, accepted ${v.accept}/${judged}` : '';
+    const tok = v.measured ? `, ~${Math.round(v.tokens / v.measured / 1000)}k tokens/run` : '';
+    return `  ${k}: ${v.picks} picks, ${v.success} success, ${v.failure} failure, ${v.limit} limit, ${v.model_gone} model_gone${rate}${acc}${tok}`;
   };
   console.log('by provider:' + (Object.keys(providers).length ? '' : ' no data yet'));
   for (const k of Object.keys(providers).sort()) console.log(row(k, providers[k]));

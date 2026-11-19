@@ -4,6 +4,7 @@
 //   balancer-relay start <agent> <prompt-file>   start in the background (opencode, claude, or deferred)
 //   balancer-relay wait  <prompt-file>           wait up to BALANCER_RELAY_WAIT_SECONDS (570); RUNNING or DONE + report
 //   balancer-relay cancel <prompt-file>          stop a running or deferred run without counting a failure
+//   balancer-relay verdict <prompt-file> accept|reject   record whether the result was used (for stats)
 // Run from the directory the work belongs to (it may be a git worktree).
 const fs = require('fs');
 const path = require('path');
@@ -13,7 +14,8 @@ const { extractReport } = require('../lib/report.cjs');
 const { logicalAgent } = require('../lib/decide.cjs');
 const { expandHome } = require('../lib/state.cjs');
 
-const USAGE = 'usage: balancer-relay start <agent> <prompt-file> | wait <prompt-file> | cancel <prompt-file>';
+const USAGE = 'usage: balancer-relay start <agent> <prompt-file> | wait <prompt-file> | cancel <prompt-file> | verdict <prompt-file> accept|reject';
+const RETRY = ' NOTE: an earlier attempt at this task on another provider ended without a report. The working tree may already contain its partial changes: run git status and git diff first, keep what is correct, fix or finish the rest, and say in your report what you found.';
 const RULES = 'STANDING RULES from the relay (they override anything softer in the attached file): (a) Never read or write outside the project root. TMPDIR is already set to the project\'s build/tmp: use it for scratch files. Never write to /tmp. Never make backup copies of files anywhere; git is the rollback (use git diff, and git checkout only on files you yourself changed). Do not use git stash. (b) Your final report must be complete even if a step failed: list commits you made, files you left uncommitted, and the raw output lines of every verification command you ran (copy them, do not paraphrase, do not quote numbers from earlier reports). (c) If a command is rejected or blocked, do not stop: report what was blocked and continue with what remains possible.';
 
 const git = (args, cwd) => {
@@ -77,11 +79,11 @@ function agentBody(cfg, agent) {
   }
 }
 
-function providerArgs(provider, { agent, cwd, prompt, cfg, paygo, model }) {
+function providerArgs(provider, { agent, cwd, prompt, cfg, paygo, model, retry }) {
   if (provider === 'claude') {
     const c = cfg.claude;
     const abs = path.resolve(cwd, prompt);
-    const msg = `Read the file ${abs} and execute the task in it exactly as written. It is your full spawn prompt from the orchestrator. Finish with the structured report it asks for. ${RULES}`;
+    const msg = `Read the file ${abs} and execute the task in it exactly as written. It is your full spawn prompt from the orchestrator. Finish with the structured report it asks for. ${RULES}${retry ? RETRY : ''}`;
     const args = ['-p', msg, '--output-format', 'stream-json', '--verbose', '--model', c.model, '--effort', c.effort,
       '--permission-mode', c.permission_mode];
     const body = agentBody(cfg, agent);
@@ -91,7 +93,7 @@ function providerArgs(provider, { agent, cwd, prompt, cfg, paygo, model }) {
     args.push('--add-dir', cwd);
     return args;
   }
-  const msg = `Execute the task in the attached file exactly as written. It is your full spawn prompt from the orchestrator. Finish with the structured report it asks for. ${RULES}`;
+  const msg = `Execute the task in the attached file exactly as written. It is your full spawn prompt from the orchestrator. Finish with the structured report it asks for. ${RULES}${retry ? RETRY : ''}`;
   const args = ['run', msg, '--agent', agent, '--dir', cwd, '--format', 'json', '-f', prompt];
   if (provider === 'free') args.push('--model', model);
   else if (paygo && cfg.paygo.model) args.push('--model', cfg.paygo.model);
@@ -102,7 +104,10 @@ function spawnProvider(provider, opts) {
   const { cwd, prompt } = opts;
   const out = fs.openSync(prompt + '.jsonl', 'w');
   const err = fs.openSync(prompt + '.err', 'w');
-  const child = cp.spawn(binFor(provider), providerArgs(provider, opts), {
+  // relay.wrap_command prefixes the provider command (a sandbox, a container runner, ...).
+  const wrap = ((opts.cfg.relay && opts.cfg.relay.wrap_command) || []).map((a) => a.split('{root}').join(repoRoot(cwd)));
+  const argv = [...wrap, binFor(provider), ...providerArgs(provider, { ...opts, retry: fs.existsSync(prompt + '.escalated') })];
+  const child = cp.spawn(argv[0], argv.slice(1), {
     cwd, detached: true, stdio: ['ignore', out, err], env: childEnv(cwd, provider, opts.cfg),
   });
   fs.closeSync(out);
@@ -111,6 +116,7 @@ function spawnProvider(provider, opts) {
   fs.writeFileSync(prompt + '.provider', (opts.paygo ? 'paygo' : provider) + '\n');
   fs.writeFileSync(prompt + '.launched', Date.now() + '\n');
   fs.rmSync(prompt + '.recorded', { force: true });
+  try { engine.attachRun(engine.makeCtx(), { provider, agent: opts.agent, pid: child.pid }); } catch { /* bookkeeping only */ }
   if (provider === 'free') fs.writeFileSync(prompt + '.model', opts.model + '\n');
   else fs.rmSync(prompt + '.model', { force: true });
   return child;
@@ -173,8 +179,14 @@ async function start(agent, prompt) {
   if (gitDir) {
     const ex = path.resolve(cwd, gitDir.trim(), 'info', 'exclude');
     try {
-      if (fs.existsSync(ex) && !fs.readFileSync(ex, 'utf8').split('\n').includes('.opencode-relay/')) {
-        fs.appendFileSync(ex, '.opencode-relay/\n');
+      if (fs.existsSync(ex)) {
+        const have = fs.readFileSync(ex, 'utf8').split('\n');
+        // The relay's own files must not show up as changes made by the agent.
+        const rel = path.relative(repoRoot(cwd), path.resolve(cwd, prompt)).split(path.sep).join('/');
+        const want = ['.opencode-relay/'];
+        if (!rel.startsWith('..') && !rel.startsWith('.opencode-relay/')) want.push(`/${rel}.*`);
+        const add = want.filter((l) => !have.includes(l));
+        if (add.length) fs.appendFileSync(ex, add.join('\n') + '\n');
       }
     } catch { /* best effort */ }
   }
@@ -249,7 +261,14 @@ function repoDelta(base, cwd) {
 // processes whose command line names this prompt file are signalled.
 function ours(pid, prompt) {
   let cmd;
-  try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'); } catch { return true; }
+  try {
+    cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+  } catch {
+    // No /proc (macOS, BSD): ask ps. If that fails too the pid is trusted, as before.
+    const r = cp.spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+    if (r.status !== 0 || !r.stdout) return true;
+    cmd = r.stdout;
+  }
   return cmd.includes(path.basename(prompt));
 }
 
@@ -368,7 +387,7 @@ async function wait(prompt) {
     console.log(`----- ${provider.toUpperCase()} ERRORS -----`);
     console.log(errors.join('\n'));
   }
-  if (report && !/(pass|passed|ok\b|GATE|canar)/i.test(report)) {
+  if (report && !/(\bpass(ed|es|ing)?\b|\bok\b|\bGATE|\bcanar)/i.test(report)) {
     console.log('relay-warning: report contains no verification output; verify the gates yourself before accepting');
   }
   const err = readText(prompt + '.err');
@@ -380,6 +399,7 @@ async function wait(prompt) {
   console.log(repoDelta(base, cwd));
   try {
     if (!recorded) {
+      if (provider === 'claude') engine.harvestClaudeUsage(ctx, prompt + '.jsonl');
       recorded = engine.recordRun(ctx, {
         provider, model, agent: agent || 'unknown', logFile: prompt + '.jsonl', errFile: prompt + '.err',
         extraFailure: !report || !!timedOut, usage: provider === 'opencode' || provider === 'claude' ? await usageNow(ctx) : null,
@@ -391,6 +411,16 @@ async function wait(prompt) {
   const esc = /^(\S+) (\S+) (\S+) -> (\S+)$/.exec(readText(prompt + '.escalated').trim());
   if (esc) console.log(`relay: escalated from ${esc[1]} (${esc[2]}: ${esc[3]}) to ${esc[4]}`);
   console.log(`relay: ${provider} (log: ${prompt}.jsonl)`);
+  return 0;
+}
+
+// The orchestrator's judgement of a finished run. It only feeds the decision log.
+function verdict(prompt, v) {
+  if (!prompt || !['accept', 'reject'].includes(v)) { console.log(USAGE); return 2; }
+  const provider = readText(prompt + '.provider').trim();
+  if (!provider || provider === 'deferred') { console.log(`relay-failure: no finished run for ${prompt}`); return 2; }
+  engine.recordVerdict(engine.makeCtx(), { provider, agent: readText(prompt + '.agent').trim(), model: readText(prompt + '.model').trim(), verdict: v });
+  console.log(`relay: recorded ${v} for ${provider}`);
   return 0;
 }
 
@@ -417,6 +447,7 @@ async function main(argv) {
   if (cmd === 'start') return start(a, b);
   if (cmd === 'wait') return wait(a);
   if (cmd === 'cancel') return cancel(a);
+  if (cmd === 'verdict') return verdict(a, b);
   if (cmd === '_deferred') return deferred(a, b);
   console.log(USAGE);
   return 2;

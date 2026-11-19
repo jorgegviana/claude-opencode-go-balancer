@@ -359,6 +359,44 @@ test('cancel stops the run and counts nothing against the provider', () => {
   assert.strictEqual(relay(['cancel', prompt], dir, e).stdout.trim(), `relay: not running (pid ${pid})`);
 });
 
+test('the relay keeps its own files out of git status and tells an escalated run about the first attempt', () => {
+  const { dir, prompt } = mkRepo();
+  const e = env(dir, { FAKE_OPENCODE_LOG_FILE: path.join(FX, 'logs', 'opencode-limit.jsonl'), FAKE_ARGV_FILE: '' });
+  const first = path.join(dir, 'argv-first.json');
+  relay(['start', AGENT, prompt], dir, { ...e, FAKE_ARGV_FILE: first });
+  assert.match(fs.readFileSync(path.join(dir, '.git', 'info', 'exclude'), 'utf8'), /^\/task\.md\.\*$/m);
+  const second = path.join(dir, 'argv-second.json');
+  const w = relay(['wait', prompt], dir, { ...e, FAKE_ARGV_FILE: second });
+  assert.match(w.stdout, /escalated from opencode/);
+  assert.ok(!readJson(first).argv.join(' ').includes('earlier attempt'), 'the first run is not told about a retry');
+  assert.match(readJson(second).argv.join(' '), /earlier attempt at this task on another provider ended without a report/);
+  const check = w.stdout.split('ORCHESTRATOR CHECK')[1];
+  assert.ok(!/\?\? task\.md\./.test(check), check);
+  assert.match(check, /\?\? task\.md\n/, 'the prompt itself is still shown');
+});
+
+test('verdict feeds acceptance into stats; relay.wrap_command prefixes the provider command', () => {
+  const { dir, prompt } = mkRepo();
+  const e = env(dir, { BALANCER_CONFIG: cfgFile(dir, { relay: { wrap_command: ['env', 'LEAK_TEST_API_KEY={root}'] } }) });
+  assert.strictEqual(relay(['verdict', prompt, 'accept'], dir, e).status, 2, 'no run yet');
+  relay(['start', AGENT, prompt], dir, e);
+  relay(['wait', prompt], dir, e);
+  assert.strictEqual(readJson(path.join(dir, 'argv.json')).leak, dir, 'ran through the wrapper, {root} expanded');
+  assert.strictEqual(relay(['verdict', prompt, 'maybe'], dir, e).status, 2);
+  assert.strictEqual(relay(['verdict', prompt, 'reject'], dir, e).stdout.trim(), 'relay: recorded reject for opencode');
+  relay(['verdict', prompt, 'accept'], dir, e);
+  const st = spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'balancer.cjs'), 'stats'], { encoding: 'utf8', env: e });
+  assert.match(st.stdout, /gsd-executor @ opencode: 1 picks, 1 success, .*accepted 1\/2/);
+});
+
+test('evidence warning: "took a look" is not verification output', () => {
+  const { dir, prompt } = mkRepo();
+  const log = path.join(dir, 'weak.jsonl');
+  fs.writeFileSync(log, '{"type":"text","part":{"messageID":"m","text":"I took a look and booked the change."}}\n');
+  relay(['start', AGENT, prompt], dir, env(dir, { FAKE_LOG_FILE: log }));
+  assert.match(relay(['wait', prompt], dir, env(dir, { FAKE_LOG_FILE: log })).stdout, /relay-warning: report contains no verification output/);
+});
+
 test('a malformed config stops the relay instead of silently dropping pinning', () => {
   const { dir, prompt } = mkRepo();
   const bad = path.join(dir, 'bad.json');

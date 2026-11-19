@@ -35,7 +35,8 @@ A provider's headroom is the **minimum over its windows**. Then:
 - **In-flight runs**: a run that was picked but has not finished yet counts against its provider
   (`inflight.cost_points`, 2 points of a 5 h window per run, scaled down for longer windows, or the
   learned cost once known). A burst of `start` calls therefore spreads instead of all seeing the same
-  usage snapshot. Entries expire after `inflight.ttl_minutes` (30) if the run is never recorded.
+  usage snapshot. The relay ties the entry to the provider's process, so it lasts exactly as long
+  as the run; an entry that was never launched expires after `inflight.ttl_minutes` (30).
 - **Use it or lose it**: if the 5 h window resets within 30 minutes, is under the hard stop **and
   is the window that limits the provider**, add a +15 bonus (the quota is about to be wasted
   anyway). When a longer window is the binding one there is no bonus: weekly quota is not about to
@@ -43,13 +44,18 @@ A provider's headroom is the **minimum over its windows**. Then:
 - **Hysteresis**: when both are eligible the higher headroom wins, but the previous pick is kept
   unless the other wins by **more than 10 points** (exactly 10 keeps). This stops flapping.
 - **Runs left**: 10% of a Claude window and 10% of a Go window are different amounts of work. When
-  a relayed run finishes, the relay compares the usage at pick time with the usage now and learns
-  the percent points one run costs per provider and window (a decayed average; concurrent runs
-  share the increase). Once both providers have `strategy.min_samples` (5) measured runs, the
-  comparison switches from percent headroom to **estimated runs left before the hard stop**, with
-  `strategy.hysteresis_runs` (2) as the margin. `status` and `stats` show the estimate. It is an
-  estimate: your own interactive Claude use lands in the Claude number too, which makes Claude look
-  more expensive than a worker run alone. Set `strategy.runs_remaining` to false to stay on percent.
+  a relayed run finishes, the relay reads the **tokens the run used from its own log** and compares
+  the usage at pick time with the usage now. From both it learns, per provider and window, the
+  percent points one token costs (decayed sums, so the whole-percent rounding of single runs
+  averages out; concurrent runs share the increase), and per agent the tokens a run typically uses.
+  The cost of the next run is the product of the two. Once both providers have
+  `strategy.min_samples` (10) measured runs and a window that has visibly moved, the comparison
+  switches from percent headroom to **estimated runs left before the hard stop**, with
+  `strategy.hysteresis_runs` (2) as the margin. A window that never moved is not used for the
+  estimate. `status` and `stats` show it. It is still an estimate: your own interactive Claude use
+  lands in the Claude number too. Set `strategy.runs_remaining` to false to stay on percent.
+- The reserve is subtracted from headroom as well, so a provider's headroom reaches the comparison
+  as usable quota only.
 - **Unknown data**: one unknown and one eligible picks the eligible one; one unknown and one
   ineligible picks the unknown one; both unknown picks `lanes.default_lane`. Claude data older
   than 15 minutes is unknown, except a stale hard-stop window still blocks until its reset.
@@ -107,10 +113,33 @@ decide which agents deserve a preference.
 in `lanes.escalate_on` (default `["limit", "model_gone"]`), the relay re-runs the same prompt once
 on the other subscription and keeps waiting. Add `"failure"` to also re-run crashes and timeouts;
 set `[]` to turn it off. Pinned agents, non-balanced agents and the case where the other provider
-is limited too are never escalated. The first run's logs are kept as `.opencode.jsonl` /
+is limited too are never escalated. The re-run is told that an earlier attempt may have left
+partial changes in the working tree and to inspect them first. The first run's logs are kept as `.opencode.jsonl` /
 `.claude.jsonl` (and `.err`), and the output contains
 `relay: escalated from <provider> (<agent or model>: <outcome>) to <provider>`.
 No agent names are hard-coded in `bin/` or `lib/`; see `examples/godotrpg/` for a real setup.
+
+## Using it for any task
+
+Nothing in `bin/` or `lib/` knows about a particular agent framework; GSD names appear only in
+`examples/godotrpg/`. For an arbitrary task you need:
+
+- **A prompt file** that states the task and asks for a final report. The relay treats the last
+  text of the run as the report.
+- **An agent name.** On the opencode lane it is passed as `opencode run --agent <name>`, so it must
+  be an agent opencode knows (`opencode agent list`; `build` always exists). On the Claude lane the
+  name is not passed: Claude runs with the default system prompt unless `claude.agent_prompt_dir`
+  holds `<logical name>.md`. The `go-` prefix is only a naming convention
+  (`lanes.opencode_agent_prefix`, may be empty).
+- **A git repository as working directory** for the repo-state check; without one the relay still
+  runs and reports `commits since launch: unknown`.
+
+Two things are opinionated and apply to every task: the standing rules appended to the prompt
+(stay inside the project root, scratch files in `build/tmp`, no `git stash`, a complete final
+report), and the Claude lane's tool allow-list, which only permits `git status/diff/log/add/commit`,
+`node --test` and `npm test` as shell commands. A task that needs other commands on the Claude
+lane (a Python project's test runner, say) needs `claude.allowed_tools` extended, or it will only
+work on the opencode lane.
 
 ## Paygo tier (opt-in, off by default)
 
@@ -153,7 +182,11 @@ the logical agent is in `free_lane.agents`, the agent is not pinned to Claude, a
 per-model cooldown, has a closed circuit breaker (keyed by the full model id), and is not missing from
 a successfully read catalog, nor marked `deprecated` or without tool calling there
 (`free_lane.require_toolcall`). With `free_lane.rotate: true` the ready model used longest ago is
-taken instead of the first in config order. A successful real run renews the model's canary
+taken instead of the first in config order. With `free_lane.discover: true` every free, active,
+tool-capable model in the catalogs of `free_lane.discover_providers` (default `opencode`) is a
+candidate after the configured ones, so the list does not go stale as models come and go; each
+still needs a passing canary, and `balancer canary` with no arguments covers them (run
+`balancer models --refresh` first, and schedule both, e.g. weekly from cron, to keep it current). A successful real run renews the model's canary
 (`free_lane.renew_canary_on_success`), so a lane in regular use does not expire after 7 days. Otherwise `pick` continues exactly as before. The free decision never
 reads Go or Claude usage and does not change `lastPick`.
 
@@ -203,6 +236,7 @@ node bin/balancer.cjs models [--refresh]                        # catalog vs con
 bin/balancer-relay start <agent> <prompt-file>
 bin/balancer-relay wait  <prompt-file>
 bin/balancer-relay cancel <prompt-file>             # stop a running or deferred run; nothing is counted
+bin/balancer-relay verdict <prompt-file> accept|reject   # tell the log whether the result was used
 ```
 
 `pick` prints the verdict on stdout line 1 and a one-line reason on stderr. Exit codes: `0` ok,
@@ -218,7 +252,12 @@ would silently drop pinning and privacy settings.
 
 **Decision log.** Every pick and every recorded outcome is appended to `balancer-log.jsonl` next
 to the state file (0600, rotated to `.1` at `log.max_bytes`, 5 MB; `log.enabled: false` turns it
-off). It holds agent names, verdicts, scores and outcomes, never prompts or keys.
+off). It holds agent names, verdicts, scores, outcomes, tokens, cost and duration, never prompts or keys.
+
+**Outcome is not quality.** A `success` outcome only means the run produced a report without an
+error event. `balancer-relay verdict <prompt-file> accept|reject` records what the orchestrator
+actually did with the result; `balancer stats` then shows `accepted n/m` per provider and per
+agent, which is the number to base `lanes.preferences` on.
 
 ### Environment overrides
 
@@ -238,7 +277,7 @@ State files are written atomically (tmp + rename). Updates to the balancer state
 read-modify-write under a lock file (`<state>.lock`): network and process I/O happens first on a
 snapshot, then the decision is made on freshly read state while the lock is held, so parallel
 relays cannot both take the single probe or overwrite each other's cooldowns. A lock older than
-15 s is taken over, and a process that cannot get the lock within 5 s proceeds without it rather
+15 s is taken over (atomically, by one process), and a process that cannot get the lock within 5 s proceeds without it rather
 than fail.
 
 ## Thresholds (mirrors `config/balancer.config.json`)
@@ -248,7 +287,9 @@ than fail.
 | `hard_stop_percent` | 90 |
 | `reserve_percent.claude` / `.opencode` | 10 / 0 |
 | `inflight.ttl_minutes` / `cost_points` | 30 / 2 |
-| `strategy.runs_remaining` / `min_samples` / `hysteresis_runs` / `burn_decay` | true / 5 / 2 / 0.9 |
+| `strategy.runs_remaining` / `min_samples` / `hysteresis_runs` / `burn_decay` | true / 10 / 2 / 0.9 |
+| `relay.wrap_command` | `[]` |
+| `free_lane.discover` / `discover_providers` | false / `["opencode"]` |
 | `lanes.escalate_on` | `["limit", "model_gone"]` |
 | `lanes.preferences` | `{}` |
 | `paygo.max_runs_per_day` | 10 |
@@ -293,6 +334,11 @@ A failing chained command still prints our text. With no existing statusLine:
   "command": "node /path/to/claude-opencode-go-balancer/bin/claude-usage-statusline.cjs" } }
 ```
 
+A headless Claude run also reports these windows in its own log. After each relayed Claude run the
+relay copies them into the same usage file, stamped with the start of that run, unless the
+statusline has written something newer. This keeps Claude usage from going stale while no
+interactive session is refreshing it.
+
 Until the statusline has run once, Claude usage is `unknown` and the balancer falls back as above.
 Claude numbers are only as fresh as the last statusline refresh (they go stale after 15 minutes).
 
@@ -308,7 +354,10 @@ After `DONE` the relay classifies the run and updates cooldown/breaker state **o
 line is stored in `.recorded`, and calling `wait` again replays it instead of counting the same
 run a second time.
 
-**Timeout.** A provider run older than `relay.max_run_minutes` (180; the clock starts when the
+The relay adds its own sidecar files to `.git/info/exclude` (`.opencode-relay/`, or `/<prompt>.*`
+when the prompt lives elsewhere in the repo), so they never appear as changes made by the agent.
+
+**Timeout.** The limit is enforced by `wait`: a run nobody waits on is not killed. A provider run older than `relay.max_run_minutes` (180; the clock starts when the
 provider is launched, not while deferred) is killed by the next `wait`, which prints
 `relay-failure: timeout after N min` and records a failure. `balancer-relay cancel <prompt-file>`
 stops a running or deferred run on request, releases its probe and in-flight slot, and counts
@@ -337,7 +386,15 @@ file and network access. The same holds for the opencode and free lanes, whose p
 from the opencode agent definition, and "never read outside the project root" is only an
 instruction in the prompt. If the prompts or repositories are not fully trusted, run the relay
 inside an OS-level sandbox or container (for Claude, its own sandbox setting) and keep credentials
-out of reach of that environment. It never gets `--agent` (a project agent
+out of reach of that environment. `relay.wrap_command` is the hook for that: a command prefix
+applied to every provider launch, with `{root}` replaced by the repository root, for example
+
+```json
+{ "relay": { "wrap_command": ["bwrap", "--ro-bind", "/", "/", "--bind", "{root}", "{root}", "--dev", "/dev", "--proc", "/proc"] } }
+```
+
+That example makes everything outside the repository read-only; a real profile also has to allow
+the provider's own config and cache directories. The balancer does not ship or verify a profile. It never gets `--agent` (a project agent
 file may itself be the relay agent, which would recurse). To supply the agent's instructions set
 `claude.agent_prompt_dir` (e.g. `~/.claude/agents`): `<logical agent>.md` is read, frontmatter
 stripped, and passed with `--append-system-prompt`. To widen permissions, edit

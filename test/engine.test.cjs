@@ -308,3 +308,105 @@ test('picks and outcomes are logged; stats summarises them', async () => {
   await E.pick(off.ctx, 'go-a');
   assert.ok(!fs.existsSync(off.f('balancer-log.jsonl')));
 });
+
+// ---- run-log data ----
+const { parseRunLog } = require('../lib/runlog.cjs');
+const CLAUDE_LOG = [
+  '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.22,"resetsAt":1795090800},"seven_day":{"utilization":0.155,"resetsAt":1795100400}}}}',
+  '{"type":"result","subtype":"success","is_error":false,"result":"done ok","duration_ms":60000,"total_cost_usd":0.11,"usage":{"input_tokens":6,"cache_creation_input_tokens":24000,"cache_read_input_tokens":70000,"output_tokens":594}}',
+].join('\n') + '\n';
+const OC_LOG = [
+  '{"type":"step_finish","part":{"type":"step-finish","tokens":{"total":18754,"input":18533,"output":77,"reasoning":144,"cache":{"write":0,"read":900}},"cost":0}}',
+  '{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":1000,"output":246,"reasoning":0},"cost":0.002}}',
+  '{"type":"text","part":{"messageID":"m","text":"done ok"}}',
+].join('\n') + '\n';
+
+test('parseRunLog: tokens, cost, duration and claude rate-limit windows', () => {
+  const c = parseRunLog(CLAUDE_LOG);
+  assert.strictEqual(c.tokens, 24600, 'cache reads are not counted');
+  assert.strictEqual(c.costUsd, 0.11);
+  assert.strictEqual(c.durationMs, 60000);
+  assert.deepStrictEqual(c.limits, { five_hour: { used_percentage: 22, resets_at: 1795090800 }, seven_day: { used_percentage: 15.5, resets_at: 1795100400 } });
+  const o = parseRunLog(OC_LOG);
+  assert.strictEqual(o.tokens, 18754 + 1246);
+  assert.strictEqual(o.limits, null);
+  assert.deepStrictEqual(parseRunLog('garbage\n{"type":"text"}\n'), { tokens: 0, costUsd: 0, durationMs: null, limits: null });
+});
+
+test('harvestClaudeUsage refreshes stale Claude usage from a run log, never newer statusline data', () => {
+  const t = mk();
+  fs.writeFileSync(t.f('c.jsonl'), CLAUDE_LOG);
+  assert.strictEqual(E.harvestClaudeUsage(t.ctx, t.f('c.jsonl')), false, 'statusline data from NOW is newer than the run start');
+  fs.writeFileSync(t.f('claude.json'), JSON.stringify({ ts: NOW - 2 * H, rate_limits: {} }));
+  assert.strictEqual(E.harvestClaudeUsage(t.ctx, t.f('c.jsonl')), true);
+  const s = JSON.parse(fs.readFileSync(t.f('claude.json'), 'utf8'));
+  assert.strictEqual(s.ts, NOW - 60000, 'stamped with the start of the run');
+  assert.strictEqual(s.rate_limits.five_hour.used_percentage, 22);
+  fs.writeFileSync(t.f('o.jsonl'), OC_LOG);
+  assert.strictEqual(E.harvestClaudeUsage(t.ctx, t.f('o.jsonl')), false);
+});
+
+test('in-flight entries with a pid live as long as the process, not the ttl', () => {
+  const cfg = defaults();
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  const st = { inflight: { opencode: [
+    { ts: NOW - 5 * H, agent: 'a', pid: process.pid }, // long run, still alive
+    { ts: NOW - 60000, agent: 'b', pid: dead },        // process gone
+    { ts: NOW - 60000, agent: 'c' },                   // not launched yet, inside the ttl
+    { ts: NOW - 2 * H, agent: 'd' },                   // never launched, expired
+  ] } };
+  assert.strictEqual(R.countInflight(st, 'opencode', cfg, NOW), 2);
+  assert.strictEqual(R.attachInflightPid(st, 'opencode', 'c', process.pid), true);
+  assert.strictEqual(st.inflight.opencode[2].pid, process.pid);
+  assert.strictEqual(R.attachInflightPid(st, 'opencode', 'zzz', 1), false);
+});
+
+test('cost per run: unmoved windows are not trusted; tokens scale the estimate per agent', async () => {
+  const cfg = { ...defaults(), strategy: { ...defaults().strategy, min_samples: 2 } };
+  const st = {};
+  // 10 small runs of 20k tokens that moved the 5 h window by 2 points in total, the weekly by nothing
+  for (let i = 0; i < 10; i++) R.recordBurn(st, 'opencode', { rolling: i % 5 === 0 ? 1 : 0, weekly: 0 }, { strategy: { burn_decay: 1 } }, 20000);
+  const b = st.burn.opencode;
+  assert.strictEqual(R.perRun(b, 'weekly', cfg), 0, 'measured, but it never moved');
+  assert.ok(Math.abs(R.perRun(b, 'rolling', cfg) - 0.2) < 1e-9);
+  assert.ok(Math.abs(R.perRun(b, 'rolling', cfg, 200000) - 2) < 1e-9, 'an agent that uses 10x the tokens costs 10x');
+  assert.strictEqual(R.perRun(b, 'monthly', cfg), null);
+  const p = { known: true, windows: [win('rolling', 10, 150, 300), win('weekly', 10, 5040, 10080)] };
+  const small = providerScore(p, cfg, NOW, { name: 'opencode', burn: b }).runs;
+  const big = providerScore(p, cfg, NOW, { name: 'opencode', burn: b, agentTokens: 200000 }).runs;
+  assert.ok(Math.abs(small - 400) < 1e-6 && Math.abs(big - 40) < 1e-6, `${small} ${big}`);
+  const flat = { n: 10, windows: { rolling: { delta: 0, runs: 10, tokens: 1 }, weekly: { delta: 0, runs: 10, tokens: 1 } } };
+  assert.strictEqual(providerScore(p, cfg, NOW, { name: 'opencode', burn: flat }).runs, null, 'nothing moved: stay on percent');
+  const flatDecay = { strategy: { burn_decay: 1 } };
+  R.recordTokens(st, 'opencode', 'big', 200000, flatDecay);
+  R.recordTokens(st, 'opencode', 'small', 20000, flatDecay);
+  assert.strictEqual(R.avgTokens(st, 'opencode', 'big'), 200000);
+  assert.strictEqual(R.avgTokens(st, 'opencode', 'unseen'), 110000, 'unknown agents use the provider average');
+  assert.strictEqual(R.avgTokens(st, 'claude', 'big'), 0);
+});
+
+test('recordRun stores tokens per agent and logs them', () => {
+  const t = mk();
+  fs.writeFileSync(t.f('o.jsonl'), OC_LOG);
+  E.recordRun(t.ctx, { provider: 'opencode', agent: 'go-w', logFile: t.f('o.jsonl') });
+  assert.strictEqual(R.avgTokens(t.state(), 'opencode', 'w'), 20000);
+  const ev = fs.readFileSync(t.f('balancer-log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).pop();
+  assert.strictEqual(ev.tokens, 20000);
+  assert.strictEqual(ev.cost_usd, 0.002);
+});
+
+test('free_lane.discover adds free, active, tool-capable catalog models after the configured ones', () => {
+  const cfg = defaults();
+  cfg.free_lane = { ...cfg.free_lane, models: ['opencode/b-free'] };
+  const cats = { opencode: {
+    'opencode/a-free': { free: true, status: 'active', toolcall: true },
+    'opencode/b-free': { free: true, status: 'active', toolcall: true },
+    'opencode/paid': { free: false, status: 'active', toolcall: true },
+    'opencode/old-free': { free: true, status: 'deprecated', toolcall: true },
+    'opencode/chat-free': { free: true, status: 'active', toolcall: false },
+  }, openrouter: { 'openrouter/x:free': { free: true, status: 'active', toolcall: true } } };
+  assert.deepStrictEqual(F.freeCandidates(cfg, cats), ['opencode/b-free']);
+  cfg.free_lane.discover = true;
+  assert.deepStrictEqual(F.freeCandidates(cfg, cats), ['opencode/b-free', 'opencode/a-free']);
+  assert.deepStrictEqual(F.freeCandidates(cfg, { opencode: null }), ['opencode/b-free'], 'no catalog, nothing discovered');
+});
