@@ -6,7 +6,7 @@ const { windowHeadroom, providerScore, decide } = require('../lib/decide.cjs');
 
 const NOW = Date.parse('2026-11-17T12:00:00Z');
 const MIN = 60000;
-const cfg = defaults();
+const cfg = { ...defaults(), reserve_percent: { claude: 0, opencode: 0 } }; // plain headroom maths; the reserve has its own tests
 const approx = (a, b) => assert.ok(Math.abs(a - b) < 1e-6, `${a} !~ ${b}`);
 
 // window of 100 minutes ending at now + (100 - elapsed) minutes, so elapsed% == elapsed

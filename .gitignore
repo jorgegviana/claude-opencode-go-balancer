@@ -6,6 +6,12 @@
 *.agent
 *.model
 *.escalated
+*.recorded
+*.launched
+*.timeout
+*.child
+*.lock
+balancer-log.jsonl*
 *.tmp
 balancer-state.json
 usage-state.json

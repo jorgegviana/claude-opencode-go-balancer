@@ -3,7 +3,9 @@
 const fs = require('fs');
 const path = require('path');
 
-module.exports = function run(defaultLines) {
+module.exports = function run(defaultLines, ownLogVar) {
+  // ownLogVar: an env var naming a log file for this fake only (FAKE_LOG_FILE applies to both).
+  if (ownLogVar && process.env[ownLogVar]) process.env.FAKE_LOG_FILE = process.env[ownLogVar];
   if (process.env.FAKE_CALL_LOG) fs.appendFileSync(process.env.FAKE_CALL_LOG, process.argv.slice(2).join(' ') + '\n');
   if (process.argv[2] === 'models') {
     // Catalog fake: print FAKE_MODELS_DIR/<provider>.txt; exit 1 when unavailable. Never dumps argv.
@@ -18,7 +20,7 @@ module.exports = function run(defaultLines) {
     if (mi >= 0 && (!want || process.argv[mi + 1] === want)) fs.writeFileSync(path.join(process.cwd(), 'hello.txt'), process.env.FAKE_WRITE_HELLO);
   }
   if (process.env.FAKE_ARGV_FILE) {
-    fs.writeFileSync(process.env.FAKE_ARGV_FILE, JSON.stringify({ argv: process.argv.slice(2), tmpdir: process.env.TMPDIR || null }));
+    fs.writeFileSync(process.env.FAKE_ARGV_FILE, JSON.stringify({ argv: process.argv.slice(2), tmpdir: process.env.TMPDIR || null, leak: process.env.LEAK_TEST_API_KEY || null }));
   }
   const out = () => {
     const mi = process.argv.indexOf('--model');

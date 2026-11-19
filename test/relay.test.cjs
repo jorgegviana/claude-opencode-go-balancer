@@ -172,6 +172,18 @@ test('balancer failure falls back to plain opencode', () => {
   assert.match(lastLine(w.stdout), /^relay: opencode/);
 });
 
+test('balancer failure keeps a pinned agent on claude', () => {
+  const { dir, prompt } = mkRepo();
+  const badState = path.join(dir, 'state-is-a-dir');
+  fs.mkdirSync(badState);
+  const cfg = path.join(dir, 'pin.json');
+  fs.writeFileSync(cfg, JSON.stringify({ lanes: { pinned_to_claude: ['gsd-executor'] } }));
+  const s = relay(['start', AGENT, prompt], dir, env(dir, { BALANCER_STATE: badState, BALANCER_CONFIG: cfg }));
+  assert.strictEqual(s.status, 0, s.stderr);
+  assert.match(s.stdout, /provider=claude/);
+  assert.match(s.stderr, /balancer failed .*using claude/);
+});
+
 test('both limited: deferred start, RUNNING while waiting', () => {
   const { dir, prompt } = mkRepo();
   const e = env(dir, {
@@ -232,15 +244,167 @@ test('usage errors', () => {
   assert.match(d.stdout, /relay-failure: .* not on PATH/);
 });
 
-test('wait records a limit error: opencode goes into cooldown', () => {
+function cfgFile(dir, obj) {
+  const f = path.join(dir, 'cfg.json');
+  fs.writeFileSync(f, JSON.stringify(obj));
+  return f;
+}
+
+test('wait records a limit error: opencode goes into cooldown (escalation off)', () => {
   const { dir, prompt } = mkRepo();
-  const e = env(dir, { FAKE_LOG_FILE: path.join(FX, 'logs', 'opencode-limit.jsonl') });
+  const e = env(dir, { FAKE_LOG_FILE: path.join(FX, 'logs', 'opencode-limit.jsonl'), BALANCER_CONFIG: cfgFile(dir, { lanes: { escalate_on: [] } }) });
   relay(['start', AGENT, prompt], dir, e);
   const w = relay(['wait', prompt], dir, e);
   assert.match(w.stdout, /balancer: opencode limit; cooldown until/);
   const st = readJson(path.join(dir, 'balancer-state.json'));
   assert.strictEqual(st.providers.opencode.cooldownUntil, NOW + 120 * 1000);
   assert.match(lastLine(w.stdout), /^relay: opencode/);
+});
+
+test('wait called again after DONE replays the outcome instead of recording it twice', () => {
+  const { dir, prompt } = mkRepo();
+  const e = env(dir, { FAKE_LOG_FILE: path.join(FX, 'logs', 'opencode-limit.jsonl'), BALANCER_CONFIG: cfgFile(dir, { lanes: { escalate_on: [] } }) });
+  relay(['start', AGENT, prompt], dir, e);
+  const w1 = relay(['wait', prompt], dir, e);
+  const w2 = relay(['wait', prompt], dir, e);
+  const w3 = relay(['wait', prompt], dir, e);
+  const line = (w) => w.stdout.split('\n').find((l) => l.startsWith('balancer: '));
+  assert.strictEqual(line(w2), line(w1));
+  assert.strictEqual(line(w3), line(w1));
+  const st = readJson(path.join(dir, 'balancer-state.json'));
+  assert.strictEqual(st.providers.opencode.hits, 1);
+  assert.strictEqual(st.providers.opencode.cooldownUntil, NOW + 120 * 1000);
+});
+
+test('opencode run that dies on a limit is re-run once on claude', () => {
+  const { dir, prompt } = mkRepo();
+  const lim = path.join(FX, 'logs', 'opencode-limit.jsonl');
+  // Only fake-opencode reads FAKE_OPENCODE_LOG_FILE, so the claude re-run produces a normal report.
+  const e = env(dir, { FAKE_OPENCODE_LOG_FILE: lim });
+  relay(['start', AGENT, prompt], dir, e);
+  const w = relay(['wait', prompt], dir, e);
+  assert.strictEqual(w.status, 0, w.stdout + w.stderr);
+  assert.match(w.stdout, /FAKE CLAUDE REPORT/);
+  assert.match(w.stdout, /relay: escalated from opencode \(gsd-executor: limit\) to claude\n/);
+  assert.strictEqual(lastLine(w.stdout), `relay: claude (log: ${prompt}.jsonl)`);
+  assert.ok(fs.existsSync(prompt + '.opencode.jsonl'));
+  const st = readJson(path.join(dir, 'balancer-state.json'));
+  assert.strictEqual(st.providers.opencode.cooldownUntil, NOW + 120 * 1000, 'the limit is still recorded');
+  assert.strictEqual(st.providers.opencode.hits, 1);
+});
+
+test('a pinned agent is never escalated away from claude', () => {
+  const { dir, prompt } = mkRepo();
+  const e = env(dir, {
+    FAKE_LOG_FILE: path.join(FX, 'logs', 'claude-limit.jsonl'),
+    BALANCER_CONFIG: cfgFile(dir, { lanes: { pinned_to_claude: ['gsd-executor'] } }),
+  });
+  relay(['start', AGENT, prompt], dir, e);
+  const w = relay(['wait', prompt], dir, e);
+  assert.ok(!/escalated/.test(w.stdout));
+  assert.match(w.stdout, /balancer: claude limit/);
+  assert.strictEqual(lastLine(w.stdout), `relay: claude (log: ${prompt}.jsonl)`);
+});
+
+const EXHAUSTED = { BALANCER_OPENCODE_USAGE_FILE: path.join(FX, 'opencode-exhausted.json'), BALANCER_CLAUDE_STATE: path.join(FX, 'claude-exhausted.json') };
+
+test('paygo run is recorded as paygo and leaves the Go cooldown alone; daily cap defers', () => {
+  const { dir, prompt } = mkRepo();
+  const stateFile = path.join(dir, 'balancer-state.json');
+  fs.writeFileSync(stateFile, JSON.stringify({ providers: { opencode: { hits: 3, cooldownUntil: NOW + 3600e3 } } }));
+  const e = env(dir, { ...EXHAUSTED, BALANCER_CONFIG: cfgFile(dir, { paygo: { enabled: true, model: 'opencode/premium-pro', max_runs_per_day: 1 } }) });
+  const s = relay(['start', AGENT, prompt], dir, e);
+  assert.match(s.stdout, /provider=opencode \(paygo\)/);
+  const w = relay(['wait', prompt], dir, e);
+  assert.match(w.stdout, /FAKE OPENCODE REPORT/);
+  assert.match(w.stdout, /balancer: paygo success/);
+  assert.strictEqual(lastLine(w.stdout), `relay: paygo (log: ${prompt}.jsonl)`);
+  const st = readJson(stateFile);
+  assert.deepStrictEqual(st.providers.opencode, { hits: 3, cooldownUntil: NOW + 3600e3 });
+  assert.strictEqual(st.breakers, undefined);
+  assert.strictEqual(st.paygo.runs.length, 1);
+  const s2 = relay(['start', AGENT, prompt], dir, e);
+  assert.match(s2.stdout, /provider=deferred/, 'second paygo run of the day is over the cap');
+  relay(['cancel', prompt], dir, e);
+});
+
+test('a run longer than relay.max_run_minutes is killed and reported', () => {
+  const { dir, prompt } = mkRepo();
+  const e = env(dir, { FAKE_SLEEP_MS: '20000', BALANCER_CONFIG: cfgFile(dir, { relay: { max_run_minutes: 0.01 } }) });
+  relay(['start', AGENT, prompt], dir, e);
+  const pid = Number(fs.readFileSync(prompt + '.pid', 'utf8'));
+  const t0 = Date.now();
+  const w = relay(['wait', prompt], dir, e);
+  assert.ok(Date.now() - t0 < 10000, 'did not wait for the provider to finish');
+  assert.match(w.stdout, /^DONE\nrelay-failure: timeout after 0\.01 min/);
+  assert.match(w.stdout, /balancer: opencode failure/);
+  assert.throws(() => process.kill(pid, 0));
+});
+
+test('cancel stops the run and counts nothing against the provider', () => {
+  const { dir, prompt } = mkRepo();
+  const e = env(dir, { FAKE_SLEEP_MS: '20000' });
+  relay(['start', AGENT, prompt], dir, e);
+  const pid = Number(fs.readFileSync(prompt + '.pid', 'utf8'));
+  assert.strictEqual(readJson(path.join(dir, 'balancer-state.json')).inflight.opencode.length, 1);
+  const c = relay(['cancel', prompt], dir, e);
+  assert.strictEqual(c.stdout.trim(), `cancelled pid ${pid}`);
+  assert.throws(() => process.kill(pid, 0));
+  const w = relay(['wait', prompt], dir, e);
+  assert.match(w.stdout, /^DONE\n/);
+  assert.match(w.stdout, /balancer: cancelled \(not recorded\)/);
+  const st = readJson(path.join(dir, 'balancer-state.json'));
+  assert.strictEqual(st.breakers, undefined);
+  assert.strictEqual(st.inflight.opencode.length, 0);
+  assert.strictEqual(relay(['cancel', prompt], dir, e).stdout.trim(), `relay: not running (pid ${pid})`);
+});
+
+test('the relay keeps its own files out of git status and tells an escalated run about the first attempt', () => {
+  const { dir, prompt } = mkRepo();
+  const e = env(dir, { FAKE_OPENCODE_LOG_FILE: path.join(FX, 'logs', 'opencode-limit.jsonl'), FAKE_ARGV_FILE: '' });
+  const first = path.join(dir, 'argv-first.json');
+  relay(['start', AGENT, prompt], dir, { ...e, FAKE_ARGV_FILE: first });
+  assert.match(fs.readFileSync(path.join(dir, '.git', 'info', 'exclude'), 'utf8'), /^\/task\.md\.\*$/m);
+  const second = path.join(dir, 'argv-second.json');
+  const w = relay(['wait', prompt], dir, { ...e, FAKE_ARGV_FILE: second });
+  assert.match(w.stdout, /escalated from opencode/);
+  assert.ok(!readJson(first).argv.join(' ').includes('earlier attempt'), 'the first run is not told about a retry');
+  assert.match(readJson(second).argv.join(' '), /earlier attempt at this task on another provider ended without a report/);
+  const check = w.stdout.split('ORCHESTRATOR CHECK')[1];
+  assert.ok(!/\?\? task\.md\./.test(check), check);
+  assert.match(check, /\?\? task\.md\n/, 'the prompt itself is still shown');
+});
+
+test('verdict feeds acceptance into stats; relay.wrap_command prefixes the provider command', () => {
+  const { dir, prompt } = mkRepo();
+  const e = env(dir, { BALANCER_CONFIG: cfgFile(dir, { relay: { wrap_command: ['env', 'LEAK_TEST_API_KEY={root}'] } }) });
+  assert.strictEqual(relay(['verdict', prompt, 'accept'], dir, e).status, 2, 'no run yet');
+  relay(['start', AGENT, prompt], dir, e);
+  relay(['wait', prompt], dir, e);
+  assert.strictEqual(readJson(path.join(dir, 'argv.json')).leak, dir, 'ran through the wrapper, {root} expanded');
+  assert.strictEqual(relay(['verdict', prompt, 'maybe'], dir, e).status, 2);
+  assert.strictEqual(relay(['verdict', prompt, 'reject'], dir, e).stdout.trim(), 'relay: recorded reject for opencode');
+  relay(['verdict', prompt, 'accept'], dir, e);
+  const st = spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'balancer.cjs'), 'stats'], { encoding: 'utf8', env: e });
+  assert.match(st.stdout, /gsd-executor @ opencode: 1 picks, 1 success, .*accepted 1\/2/);
+});
+
+test('evidence warning: "took a look" is not verification output', () => {
+  const { dir, prompt } = mkRepo();
+  const log = path.join(dir, 'weak.jsonl');
+  fs.writeFileSync(log, '{"type":"text","part":{"messageID":"m","text":"I took a look and booked the change."}}\n');
+  relay(['start', AGENT, prompt], dir, env(dir, { FAKE_LOG_FILE: log }));
+  assert.match(relay(['wait', prompt], dir, env(dir, { FAKE_LOG_FILE: log })).stdout, /relay-warning: report contains no verification output/);
+});
+
+test('a malformed config stops the relay instead of silently dropping pinning', () => {
+  const { dir, prompt } = mkRepo();
+  const bad = path.join(dir, 'bad.json');
+  fs.writeFileSync(bad, '{ "lanes": { "pinned_to_claude": ["gsd-executor"] }, }');
+  const s = relay(['start', AGENT, prompt], dir, env(dir, { BALANCER_CONFIG: bad }));
+  assert.strictEqual(s.status, 1);
+  assert.match(s.stdout, /relay-failure: config .*invalid JSON/);
+  assert.ok(!fs.existsSync(prompt + '.pid'));
 });
 
 // ---- free lane ----
@@ -274,6 +438,20 @@ test('free: start/wait runs opencode with --model, records the model only', () =
   assert.strictEqual(a.tmpdir, path.join(dir, 'build', 'tmp'));
   const st = readJson(path.join(dir, 'balancer-state.json'));
   assert.strictEqual(st.providers, undefined);
+  assert.strictEqual(st.canary[FREE_M].ts, NOW, 'a successful run renews the canary');
+});
+
+test('free runs do not inherit secret-looking environment variables; other lanes do', () => {
+  const a = mkRepo();
+  const fe = freeEnv(a.dir, { LEAK_TEST_API_KEY: 'x1' });
+  relay(['start', AGENT, a.prompt], a.dir, fe);
+  relay(['wait', a.prompt], a.dir, fe);
+  assert.strictEqual(readJson(path.join(a.dir, 'argv.json')).leak, null);
+  const b = mkRepo();
+  const oe = env(b.dir, { LEAK_TEST_API_KEY: 'x1' });
+  relay(['start', AGENT, b.prompt], b.dir, oe);
+  relay(['wait', b.prompt], b.dir, oe);
+  assert.strictEqual(readJson(path.join(b.dir, 'argv.json')).leak, 'x1');
 });
 
 test('free: failed free run escalates exactly once to the normal lanes', () => {

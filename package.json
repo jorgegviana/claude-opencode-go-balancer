@@ -1,6 +1,6 @@
 {
   "name": "claude-opencode-go-balancer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Usage-based router between a Claude Pro subscription and an OpenCode Go subscription",
   "license": "MIT",
@@ -12,6 +12,7 @@
   },
   "scripts": {
     "test": "node --test test/*.test.cjs",
-    "scan-secrets": "node scripts/scan-secrets.cjs"
+    "scan-secrets": "node scripts/scan-secrets.cjs",
+    "install-hooks": "git config core.hooksPath scripts/hooks"
   }
 }
